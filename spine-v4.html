@@ -1,0 +1,1738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Framework — Scroll Tool v4 (tree + inspector)</title>
+<style>
+  :root{--bg:#0f1115;--ink:#ECEAE4;--amber:#FF6A1A;--mute:#7d8088;--panel:#181b21;--line:#2a2d33;
+    --img:#7aa2ff;--vid:#c08cff;--txt:#9CFFC4;--fx:#FF6A1A}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:"Outfit",Arial,sans-serif;overflow-x:hidden}
+  /* the zoomable viewport wraps canvas + handle overlay so they scale as one.
+     transform creates a stacking context, so the wrapper carries the z-level
+     the handles used to have; pointer events re-enable per interactive child. */
+  #viewport{position:fixed;inset:0;z-index:15;transform-origin:50% 50%;pointer-events:none}
+  #viewport.scaled #stage{outline:1px solid var(--line);outline-offset:-1px}
+  #stage{position:fixed;inset:0;width:100vw;height:100vh;display:block;pointer-events:none}
+  #handles{position:fixed;inset:0;pointer-events:none}
+  .thandle{position:absolute;pointer-events:auto;transform:translate(-50%,-50%);cursor:grab;
+    background:rgba(156,255,196,.14);border:1px solid var(--txt);border-radius:6px;
+    padding:3px 7px;font-family:ui-monospace,monospace;font-size:10px;color:var(--txt);
+    letter-spacing:.04em;white-space:nowrap;backdrop-filter:blur(3px);user-select:none;max-width:160px;overflow:hidden;text-overflow:ellipsis}
+  .thandle:hover{background:rgba(156,255,196,.26)}
+  .thandle.drag{cursor:grabbing;background:var(--txt);color:#0f1115}
+  .thandle::before{content:"✛ ";opacity:.7}
+  /* ── mask gizmo (selected effect layer with mask on) ── */
+  .mgizmo{position:absolute;inset:0;pointer-events:none}
+  .mcirc{position:absolute;transform:translate(-50%,-50%);border:1.5px dashed rgba(255,106,26,.85);border-radius:50%;pointer-events:auto;cursor:move}
+  .mcirc:hover{border-color:var(--amber);background:rgba(255,106,26,.04)}
+  .mdot{position:absolute;width:14px;height:14px;transform:translate(-50%,-50%);border-radius:50%;background:var(--amber);border:2px solid #0f1115;pointer-events:auto;cursor:grab;box-shadow:0 0 8px rgba(255,106,26,.5)}
+  .mdot:active{cursor:grabbing}
+  .mgrip{position:absolute;width:12px;height:12px;transform:translate(-50%,-50%);border-radius:50%;background:#0f1115;border:2px solid var(--amber);pointer-events:auto;cursor:ew-resize}
+  nav{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;justify-content:space-between;align-items:center;padding:20px 4vw;mix-blend-mode:difference}
+  nav .logo{font-family:"Hoover",system-ui;font-weight:700;letter-spacing:.04em;font-size:16px}
+  main{position:relative;z-index:2}
+  .sect{display:block}
+
+  /* ── reopen pill: only visible when authoring panels are collapsed ── */
+  #dockToggle{position:fixed;top:16px;right:16px;z-index:32;background:var(--amber);color:#111;border:none;border-radius:8px;font-family:ui-monospace,monospace;font-size:12px;font-weight:700;padding:9px 14px;cursor:pointer;letter-spacing:.05em;display:none}
+  body.ui-closed #dockToggle{display:block}
+  #showUI{position:fixed;bottom:16px;right:16px;z-index:40;background:var(--amber);color:#111;border:none;border-radius:8px;font-family:ui-monospace,monospace;font-size:12px;font-weight:700;padding:10px 14px;cursor:pointer;letter-spacing:.05em;display:none}
+  /* preview mode: hide ALL authoring chrome, show only the restore pill */
+  body.preview #dockToggle, body.preview #tree, body.preview #inspector,
+  body.preview #handles, body.preview #hud{display:none!important}
+  body.preview #showUI{display:block}
+  body.no-dev #handles{display:none}
+  body.no-dev #hud{display:none}
+  body.ui-closed #tree, body.ui-closed #inspector{display:none}
+
+  /* ── LEFT: layer tree ── */
+  #tree{position:fixed;top:0;left:0;height:100vh;width:240px;z-index:30;background:rgba(16,18,22,.95);border-right:1px solid var(--line);backdrop-filter:blur(12px);display:flex;flex-direction:column}
+  #treeBody{flex:1;overflow-y:auto}
+  #treeFoot{border-top:1px solid var(--line);padding:4px 0 8px}
+  #treeFoot .copybtn{margin:6px 12px 0;width:calc(100% - 24px);padding:8px;font-size:10px}
+  .tsec{border-bottom:1px solid var(--line);padding-bottom:8px}
+  .tsec-h{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink)}
+  .tsec-h .num{color:var(--amber)}
+  .tsec-h .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tsec-h .delsec{color:#ff5a5a;padding:0 4px;opacity:.5}
+  .tsec-h .delsec:hover{opacity:1}
+  .tsec-h:hover{background:rgba(255,255,255,.04)}
+  .tsec-h.sel{background:rgba(255,106,26,.12)}
+  .trow{display:flex;align-items:center;gap:8px;padding:7px 12px 7px 24px;cursor:pointer;font-size:12px;color:#cdd0d6;user-select:none}
+  .trow .ic{width:8px;height:8px;border-radius:2px;flex:none}
+  .trow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:.04em}
+  .trow .ty{font-size:9px;color:var(--mute);text-transform:uppercase;letter-spacing:.08em}
+  .trow:hover{background:rgba(255,255,255,.04)}
+  .trow.sel{background:rgba(255,106,26,.16);color:var(--ink)}
+  .trow.dragging{opacity:.35}
+  .trow.drop-above{box-shadow:inset 0 2px 0 var(--amber)}
+  .trow.drop-below{box-shadow:inset 0 -2px 0 var(--amber)}
+  .trow .eye{flex:none;color:var(--mute);opacity:0;cursor:pointer;font-size:13px;line-height:1;padding:0 2px}
+  .trow:hover .eye{opacity:.75}
+  .trow .eye.off{opacity:1;color:var(--amber)}
+  .trow.isHidden .ic{opacity:.35}
+  .trow.isHidden .nm,.trow.isHidden .ty{opacity:.4}
+  .rename{background:#101319;border:1px solid var(--amber);color:var(--ink);font-family:inherit;font-size:11px;padding:1px 4px;border-radius:4px;width:100%;min-width:0}
+  .tree-add{padding:8px 12px 0}
+
+  /* ── RIGHT: inspector (shows ONLY the current selection) ── */
+  #inspector{position:fixed;top:0;right:0;height:100vh;width:320px;z-index:30;background:rgba(16,18,22,.95);border-left:1px solid var(--line);backdrop-filter:blur(12px);overflow-y:auto;padding-bottom:24px}
+  #insToolbar{display:flex;gap:8px;padding:12px 12px 0}
+  #insToolbar2{display:flex;gap:8px;padding:8px 12px 0}
+  #insToolbar2 .tbtn{flex:1;text-align:center}
+  .tbtn{background:#101319;color:var(--ink);border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,monospace;font-size:11px;padding:8px 10px;cursor:pointer;letter-spacing:.05em}
+  .tbtn.off{opacity:.5}
+  .tbtn:hover{border-color:var(--amber)}
+  #insBody{padding:0 16px 16px}
+  .ins-lh{display:flex;align-items:center;gap:6px;font-family:ui-monospace,monospace;font-size:11px;color:#cdd0d6;margin-top:12px}
+  .ins-lh .ty{font-size:9px;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:.08em;border:1px solid currentColor}
+  .ins-lh .nm{flex:1;text-transform:uppercase;letter-spacing:.08em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ins-lh button{background:none;border:1px solid var(--line);color:var(--mute);border-radius:5px;cursor:pointer;width:24px;height:22px;font-size:11px;line-height:1}
+  .ins-lh button:hover:not(:disabled){color:var(--ink);border-color:var(--amber)}
+  .ins-lh button:disabled{opacity:.3;cursor:default}
+
+  .dock-h{font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--amber);padding:16px 16px 8px}
+  .sub{font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin:12px 0 6px}
+  label.f{display:flex;justify-content:space-between;font-size:12px;color:#aeb2ba;margin:7px 0 3px}
+  label.f b{color:var(--ink);font-family:ui-monospace,monospace}
+  input[type=range]{width:100%;accent-color:var(--amber);height:3px}
+  input[type=text],input[type=url]{width:100%;background:#101319;border:1px solid var(--line);color:var(--ink);font-family:"Outfit";font-size:12px;padding:6px 8px;border-radius:6px}
+  select{width:100%;background:#101319;border:1px solid var(--line);color:var(--ink);font-family:"Outfit";font-size:12px;padding:6px 8px;border-radius:6px}
+
+  .addbar{display:flex;gap:6px}
+  .addbar select{flex:1}
+  .addbar button{background:var(--amber);color:#111;border:none;border-radius:6px;font-weight:700;cursor:pointer;padding:0 12px;font-family:ui-monospace,monospace;font-size:12px}
+  .uploadbtn{display:block;width:100%;margin-top:6px;background:#1e2127;border:1px dashed var(--line);color:#aeb2ba;border-radius:6px;padding:7px;font-family:ui-monospace,monospace;font-size:11px;cursor:pointer;text-align:center}
+  .uploadbtn:hover{border-color:var(--img);color:var(--img)}
+  .note{font-size:10px;color:#5a5d64;margin-top:4px;line-height:1.4}
+  /* segmented control for mouse-axes */
+  .seg{display:flex;gap:4px;margin:6px 0 2px}
+  .seg button{flex:1;background:#101319;border:1px solid var(--line);color:var(--mute);font-family:ui-monospace,monospace;font-size:11px;padding:5px;border-radius:6px;cursor:pointer}
+  .seg button.on{background:var(--amber);color:#111;border-color:var(--amber);font-weight:700}
+  /* per-section copy button */
+  .seccopy{display:block;width:100%;margin-top:12px;background:#101319;border:1px solid var(--line);color:var(--amber);font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.1em;padding:8px;border-radius:7px;cursor:pointer;text-transform:uppercase}
+  .seccopy:hover{border-color:var(--amber)}
+
+  #hud{position:fixed;left:240px;right:320px;bottom:0;z-index:25;background:rgba(10,12,15,.88);border-top:1px solid var(--line);backdrop-filter:blur(12px);padding:10px 16px 12px;font-family:ui-monospace,monospace;font-size:11px}
+  body.ui-closed #hud{left:0;right:0}
+  #hud .t{color:var(--amber);letter-spacing:.18em;text-transform:uppercase;margin-bottom:8px;font-size:10px}
+  .bar{position:relative;height:34px;background:#101319;border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:pointer;touch-action:none}
+  .bar:active{cursor:grabbing}
+  .band{position:absolute;top:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:9px;color:#cfd2d8;border-right:1px solid rgba(255,255,255,.08);pointer-events:none}
+  .ph{position:absolute;top:0;bottom:0;width:2px;background:#9CFFC4;z-index:3;box-shadow:0 0 8px #9CFFC4;pointer-events:none}
+  #hud .sp{position:absolute;top:12px;right:16px;color:#cfd2d8}
+  .copybtn{display:block;background:#101319;border:1px solid var(--line);color:var(--amber);font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.1em;padding:10px;border-radius:8px;cursor:pointer;text-transform:uppercase}
+</style>
+</head>
+<body>
+<div id="viewport"><canvas id="stage"></canvas><div id="handles"></div></div>
+<button id="dockToggle">✦ edit</button>
+<button id="showUI">✦ show UI</button>
+<main id="main"></main>
+<div id="hud"><div class="t">Scroll timeline</div><div class="sp" id="sp">00%</div><div class="bar" id="bar"></div></div>
+
+<aside id="tree">
+  <div class="dock-h">Sections · layers</div>
+  <div id="treeBody"></div>
+  <div id="treeFoot">
+    <button class="copybtn" id="addSection" style="color:#9CFFC4">＋ add section</button>
+    <button class="copybtn" id="copyEngine">⚙ copy engine (paste once)</button>
+    <button class="copybtn" id="copyCfg">⧉ copy full config (handoff spec)</button>
+  </div>
+</aside>
+
+<aside id="inspector">
+  <div id="insToolbar">
+    <button class="tbtn" id="closeUI">◧ close panels</button>
+    <button class="tbtn" id="devToggle">◉ dev UI</button>
+    <button class="tbtn" id="hideAll">⤢ preview</button>
+  </div>
+  <div id="insToolbar2">
+    <button class="tbtn" id="zoomOut" title="zoom out">−</button>
+    <button class="tbtn" id="zoomPct" title="reset zoom to 100%">100%</button>
+    <button class="tbtn" id="zoomIn" title="zoom in">＋</button>
+  </div>
+  <div class="dock-h" id="insTitle">Inspector</div>
+  <div id="insBody"></div>
+</aside>
+
+<script type="importmap">
+{ "imports": { "three":"https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" }}
+</script>
+<script type="module">
+import * as THREE from "three";
+
+/* ============================================================================
+   ███ CONFIG ███ — unified layer model.
+   Each section has ONE ordered `layers` array. Layer types:
+     image  : draws a texture (Bunny URL). Content layer.
+     text   : draws text. Content layer.
+     effect : distorts everything drawn BELOW it in the stack.
+   Render walks bottom→top. So a text layer ABOVE an effect stays crisp;
+   below it, it gets distorted. Exactly the Unicorn model.
+
+   transitionOut    : crossfade type into the NEXT section (dissolve/wipe/zoom/none)
+   transitionLength : 0..100 % — how much of the natural fade window to use.
+                      0 = hard cut (no overlap), 100 = full wide dissolve.
+   interactivity    : per-section mouse behaviour (drives uMouse/uHover that the
+                      effect shaders sample). { track, momentum, spring, axes }
+                        track    0..100  how strongly effects follow the cursor
+                        momentum 0..100  how much the motion carries / overshoots
+                        spring   0..100  springy return toward the cursor
+                        axes     'x' | 'y' | 'both'
+   ============================================================================ */
+const CONFIG = {
+  meta:{ name:"Framework spine v4", model:"unified-layers", devUI:false },
+  sections:[
+    { id:"revelation", height:100, transitionOut:"dissolve", transitionLength:40,
+      interactivity:{ track:60, momentum:20, spring:30, axes:"both", trail:{ style:"none", decay:90, radius:12, strength:50 } },
+      layers:[
+        { type:"image", src:"", fit:"cover", tint:"#241a12" },
+        { type:"text",  content:"REVELATION", size:64, weight:700, color:"#ffffff", x:6, y:50 },
+        { type:"effect", fx:"flowfield", params:{ scale:3.0, strength:0.10, speed:0.35 } },
+        { type:"text",  content:"your different", size:26, weight:400, color:"#FF6A1A", x:6, y:64 }
+      ] },
+    { id:"amplification", height:100, transitionOut:"wipe", transitionLength:40,
+      interactivity:{ track:60, momentum:20, spring:30, axes:"both", trail:{ style:"none", decay:90, radius:12, strength:50 } },
+      layers:[
+        { type:"image", src:"", fit:"cover", tint:"#16202b" },
+        { type:"text",  content:"AMPLIFICATION", size:52, weight:700, color:"#ffffff", x:6, y:52 },
+        { type:"effect", fx:"pixelate", params:{ minBlocks:12, maxBlocks:150, hoverRadius:0.28, hoverStrength:1.0 } }
+      ] },
+    { id:"threshold", height:100, transitionOut:"none", transitionLength:40,
+      interactivity:{ track:60, momentum:20, spring:30, axes:"both", trail:{ style:"none", decay:90, radius:12, strength:50 } },
+      layers:[
+        { type:"image", src:"", fit:"cover", tint:"#241015" },
+        { type:"effect", fx:"liquify", params:{ amp:0.04, freq:5.0, speed:1.0 } },
+        { type:"text",  content:"THRESHOLD", size:64, weight:700, color:"#ffffff", x:6, y:50 }
+      ] }
+  ]
+};
+/* ============================ end config ============================ */
+
+const VS=`varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.,1.);}`;
+const NOISE_GLSL=`float h(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5);}
+  float sn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y);}`;
+
+/* effect definitions (distortions that read uTex = everything below) */
+const FX = {
+  flowfield:{ params:[['scale',1,10],['strength',0,0.3],['speed',0,2]],
+    glsl:`uniform float uScale,uStrength,uSpeed;${NOISE_GLSL}
+      vec4 fx(vec2 uv){float a=sn(uv*uScale+uTime*uSpeed)*6.28;vec2 fl=vec2(cos(a),sin(a))*uStrength;fl+=(uMouse-uv)*uHover*0.12;return texture2D(uTex,uv+fl);}`},
+  noise:{ params:[['amount',0,0.2],['freq',1,20],['tint',0,1]],
+    glsl:`uniform float uAmount,uFreq,uTint;${NOISE_GLSL}
+      vec4 fx(vec2 uv){vec2 d=vec2(sn(uv*uFreq+uTime*0.5),sn(uv*uFreq-uTime*0.4))-0.5;float rip=uHover*smoothstep(0.35,0.,distance(uv,uMouse));
+      vec4 c=texture2D(uTex,uv+d*(uAmount+rip*0.05));c.rgb=mix(c.rgb,c.rgb*vec3(1.,.45,.15)*1.3,uTint*(0.4+rip));return c;}`},
+  pixelate:{ params:[['minBlocks',2,80],['maxBlocks',40,400],['hoverRadius',0,0.6],['hoverStrength',0,2]],
+    glsl:`uniform float uMinBlocks,uMaxBlocks,uHoverRadius,uHoverStrength;
+      vec4 fx(vec2 uv){
+        float c=1.-abs(uProg-0.5)*2.;
+        float b=mix(uMinBlocks,uMaxBlocks,clamp(c,0.,1.));
+        // aspect-correct distance so the hover reveal is a circle, not an ellipse
+        float ar=uRes.x/uRes.y;
+        vec2 d=uv-uMouse; d.x*=ar;
+        float dist=length(d);
+        float reveal = uHoverRadius>0.0001 ? smoothstep(uHoverRadius,0.,dist)*uHover*uHoverStrength : 0.0;
+        b=mix(b, uMaxBlocks, clamp(reveal,0.,1.));
+        return texture2D(uTex,floor(uv*b)/b+0.5/b);
+      }`},
+  liquify:{ params:[['amp',0,0.12],['freq',1,15],['speed',0,4]],
+    glsl:`uniform float uAmp,uFreq,uSpeed;${NOISE_GLSL}
+      vec4 fx(vec2 uv){float t=uTime*uSpeed;vec2 d=vec2(sn(uv*uFreq+t),sn(uv*uFreq+t+5.2))-0.5;d+=(uMouse-uv)*uHover*0.3;return texture2D(uTex,uv+d*uAmp);}`},
+  /* ---- Unicorn-style effects ---- */
+  flowfield2:{ params:[['amount',0,0.25],['scale',1,12],['mix',0,1],['angle',0,6.28319],['phase',0,6.28319],['speed',0,2]],
+    glsl:`uniform float uAmount,uScale,uMix,uAngle,uPhase,uSpeed;${NOISE_GLSL}
+      vec4 fx(vec2 uv){
+        // domain-warped curl-ish flow: sample noise twice, feed first into second
+        float t=uTime*uSpeed + uPhase;
+        vec2 q=vec2(sn(uv*uScale + t), sn(uv*uScale + vec2(5.2,1.3) + t));
+        vec2 r=vec2(sn(uv*uScale + q*2.0 + vec2(1.7,9.2)),
+                    sn(uv*uScale + q*2.0 + vec2(8.3,2.8) + t*0.5));
+        // bias the flow along the chosen angle
+        vec2 axis=vec2(cos(uAngle),sin(uAngle));
+        vec2 flow=mix(r-0.5, axis*((r.x+r.y)-1.0), uMix);
+        flow += (uMouse-uv)*uHover*0.2;
+        return texture2D(uTex, uv + flow*uAmount);
+      }`},
+  blinds:{ params:[['frequency',2,60],['amount',0,1],['angle',0,3.14159],['distortion',0,0.2],['smoothing',0,0.5]],
+    glsl:`uniform float uFrequency,uAmount,uAngle,uDistortion,uSmoothing;
+      vec4 fx(vec2 uv){
+        // rotate uv into the blind axis
+        float ca=cos(uAngle),sa=sin(uAngle);
+        vec2 c=uv-0.5; float r=c.x*ca - c.y*sa; r+=0.5;
+        // sawtooth across the blind frequency -> 0..1 within each slat
+        float slat=fract(r*uFrequency);
+        // open fraction driven by amount (+ mouse can nudge it open)
+        float open=uAmount + (uMouse.x-uv.x)*uHover*0.4;
+        // soft edge via smoothing
+        float edge=smoothstep(open-uSmoothing-0.001, open+0.001, slat);
+        // displace the closed band -> the "blind" shove
+        vec2 dir=vec2(ca,-sa);
+        vec2 disp=dir*uDistortion*(slat-0.5);
+        vec4 col=texture2D(uTex,uv+disp);
+        // darken/cut the closed portion (mix toward transparent-black like Unicorn)
+        return mix(vec4(col.rgb*0.15,col.a), col, edge);
+      }`},
+  ripple:{ params:[['frequency',2,40],['amplitude',0,0.1],['dissipation',0,1],['speed',0,4]],
+    glsl:`uniform float uFrequency,uAmplitude,uDissipation,uSpeed;
+      vec4 fx(vec2 uv){
+        vec2 ctr=mix(vec2(0.5), uMouse, uHover);
+        vec2 d=uv-ctr; float dist=length(d);
+        float falloff=mix(1.0, exp(-dist*uDissipation*4.0), step(0.001,uDissipation));
+        float wave=sin(dist*uFrequency - uTime*uSpeed);
+        vec2 dir=dist>0.0001?normalize(d):vec2(0.);
+        return texture2D(uTex, uv + dir*wave*uAmplitude*falloff);
+      }`},
+  glass:{ params:[['radius',0.1,0.9],['amount',0,1],['dispersion',0,0.06],['glow',0,1.5]],
+    glsl:`uniform float uRadius,uAmount,uDispersion,uGlow;
+      vec4 fx(vec2 uv){
+        vec4 result;
+        vec2 ctr=mix(vec2(0.5), uMouse, uHover);
+        float ar=uRes.x/uRes.y;
+        vec2 d=(uv-ctr); d.x*=ar;
+        float dist=length(d);
+        if(dist>uRadius){
+          result=texture2D(uTex,uv);
+        } else {
+          float r=dist/uRadius;
+          float h=sqrt(max(0.0,1.0-r*r));
+          float bend=(1.0-h)*uAmount;
+          vec2 dir=dist>0.0001?normalize(d):vec2(0.0);
+          dir.x/=ar;
+          vec2 refr=uv - dir*bend*0.35 - (uv-ctr)*uAmount*0.12*(1.0-r);
+          float dsp=uDispersion*r;
+          float cr=texture2D(uTex, refr + dir*dsp).r;
+          float cg=texture2D(uTex, refr).g;
+          float cb=texture2D(uTex, refr - dir*dsp).b;
+          result=vec4(cr,cg,cb,1.0);
+          float rim=smoothstep(0.78,1.0,r)*uGlow;
+          result.rgb += rim*0.6;
+          vec2 sl=d/uRadius - vec2(-0.35,0.40);
+          float spec=smoothstep(0.34,0.0,length(sl))*uGlow*0.8;
+          result.rgb += spec;
+        }
+        return result;
+      }`},
+  /* ---- 1:1 UV-remap effects (batch 2) ----
+     All pure closed-form remaps reading uTex: they inherit mask, mouse
+     spring/momentum, trail warp and engine export with zero extra plumbing.
+     params now support an optional 4th element = default (signed params
+     would otherwise default to a do-nothing midpoint of 0). */
+  swirl:{ params:[['radius',0.05,1.0,0.35],['strength',-12,12,5],['speed',0,4,0.8]],
+    glsl:`uniform float uRadius,uStrength,uSpeed;
+      vec4 fx(vec2 uv){
+        vec2 ctr=mix(vec2(0.5), uMouse, uHover);
+        float ar=uRes.x/uRes.y;
+        vec2 d=uv-ctr; d.x*=ar;
+        float dist=length(d);
+        float fall=1.0-smoothstep(0.0,max(uRadius,0.0001),dist);
+        // bounded breathing (sin), NOT cumulative spin — the twist never winds up infinitely
+        float a=uStrength*(1.0+0.35*sin(uTime*uSpeed))*fall;
+        float ca=cos(a),sa=sin(a);
+        vec2 r=vec2(d.x*ca-d.y*sa, d.x*sa+d.y*ca);
+        r.x/=ar;
+        return texture2D(uTex, ctr+r);
+      }`},
+  bulge:{ params:[['radius',0.05,1.0,0.35],['amount',-1,1,0.5],['edge',0,0.95,0.4]],
+    glsl:`uniform float uRadius,uAmount,uEdge;
+      vec4 fx(vec2 uv){
+        vec4 result;
+        vec2 ctr=mix(vec2(0.5), uMouse, uHover);
+        float ar=uRes.x/uRes.y;
+        vec2 d=uv-ctr; d.x*=ar;
+        float dist=length(d);
+        if(dist>=uRadius||uRadius<0.0001){
+          result=texture2D(uTex,uv);
+        } else {
+          float r=dist/uRadius;
+          // amount>0 magnifies (bulge), <0 compresses (pinch): r' = r^k
+          float k=pow(2.0,uAmount*2.0);
+          float rn=pow(r,k);
+          rn=mix(rn,r,smoothstep(1.0-uEdge,1.0,r));   // ease to identity at the rim
+          vec2 dir=dist>0.0001?normalize(d):vec2(0.0);
+          vec2 nd=dir*rn*uRadius; nd.x/=ar;
+          result=texture2D(uTex,ctr+nd);
+        }
+        return result;
+      }`},
+  sinewaves:{ params:[['frequency',1,60,18],['amplitude',0,0.15,0.04],['angle',0,3.14159,1.5708],['speed',0,4,1.2]],
+    glsl:`uniform float uFrequency,uAmplitude,uAngle,uSpeed;
+      vec4 fx(vec2 uv){
+        float ca=cos(uAngle),sa=sin(uAngle);
+        vec2 axis=vec2(ca,sa);      // phase runs along this axis
+        vec2 perp=vec2(-sa,ca);     // displacement is perpendicular to it
+        float ph=dot(uv-vec2(0.5),axis);
+        float w=sin(ph*uFrequency + uTime*uSpeed)*uAmplitude;
+        w*=1.0+uHover*0.6*smoothstep(0.5,0.0,distance(uv,uMouse));   // local boost near cursor
+        return texture2D(uTex, uv + perp*w);
+      }`},
+  mirror:{ params:[['angle',0,3.14159,0],['offset',-0.5,0.5,0],['flip',0,1,0]],
+    glsl:`uniform float uAngle,uOffset,uFlip;
+      vec4 fx(vec2 uv){
+        float ca=cos(uAngle),sa=sin(uAngle);
+        vec2 n=mix(vec2(ca,sa),vec2(-ca,-sa),step(0.5,uFlip));
+        float mOff=dot(uMouse-vec2(0.5),n)*uHover;   // mirror line follows the cursor by track amount
+        float dl=dot(uv-vec2(0.5),n)-uOffset-mOff;
+        vec2 muv=uv-2.0*max(dl,0.0)*n;               // fold: far side reflects onto kept side
+        return texture2D(uTex,muv);
+      }`},
+  polar:{ params:[['scale',0.3,3,1],['rotate',0,6.28319,0],['speed',0,2,0],['inverse',0,1,0]],
+    glsl:`uniform float uScale,uRotate,uSpeed,uInverse;
+      vec4 fx(vec2 uv){
+        vec4 result;
+        vec2 ctr=mix(vec2(0.5), uMouse, uHover);
+        float ar=uRes.x/uRes.y;
+        float rot=(uRotate+uTime*uSpeed)/6.28318;
+        if(uInverse<0.5){
+          // cartesian -> polar: pixel's (angle,radius) around center reads source as (x,y)
+          vec2 d=uv-ctr; d.x*=ar;
+          float a=atan(d.y,d.x)/6.28318+0.5+rot;
+          float r=length(d)*uScale;
+          result=texture2D(uTex,vec2(fract(a),r));
+        } else {
+          // polar -> cartesian: wrap the source around the center
+          float a=(uv.x+rot)*6.28318;
+          float r=uv.y/max(uScale,0.0001);
+          vec2 d=vec2(cos(a),sin(a))*r; d.x/=ar;
+          result=texture2D(uTex,ctr+d);
+        }
+        return result;
+      }`},
+};
+const FX_NAMES=Object.keys(FX);
+const HEADER=`precision highp float;varying vec2 vUv;uniform sampler2D uTex,uTrail;uniform float uTime,uProg,uHover,uOpacity,uTrailStyle,uTrailStrength,uMaskOn,uMaskRadius,uMaskFeather,uMaskInvert;uniform vec2 uMouse,uRes,uMaskPos;
+// sample trail intensity (0..1) at a uv; red channel holds the accumulated wake
+float trailAt(vec2 uv){return texture2D(uTrail,uv).r;}
+// trailWarp: given a uv, return a distorted uv based on the active trail style.
+// styles: 0 none · 1 smoke · 2 blur/glass · 3 ripple · 4 displace
+vec2 trailWarp(vec2 uv){
+  vec2 out_uv=uv;
+  float tr=trailAt(uv);
+  if(uTrailStyle>=0.5 && tr>=0.001){
+    float s=uTrailStrength*tr;
+    float e=0.004;
+    vec2 g=vec2(trailAt(uv+vec2(e,0.))-trailAt(uv-vec2(e,0.)),
+               trailAt(uv+vec2(0.,e))-trailAt(uv-vec2(0.,e)));
+    // amplify the gradient — raw texture-sample differences are tiny
+    vec2 gn = g*40.0;
+    if(uTrailStyle<1.5){            // smoke: billowing swirl, time-animated, present in the wake body
+      vec2 perp=vec2(-gn.y,gn.x);
+      vec2 swirl = perp*1.4 + gn*0.6*sin(uTime*2.0+tr*6.28);
+      out_uv = uv + (swirl + vec2(sin(uTime*1.3+uv.y*18.0), cos(uTime*1.1+uv.x*18.0))*tr*0.5)*s;
+    } else if(uTrailStyle<2.5){     // blur/glass: strong outward smear with chromatic-ish spread
+      out_uv = uv + gn*s*3.2 + normalize(gn+1e-4)*tr*s*1.5;
+    } else if(uTrailStyle<3.5){     // ripple: concentric waves keyed to trail age
+      out_uv = uv + gn*s*sin(tr*30.0-uTime*4.0)*2.0;
+    } else {                        // displace: straight shove along the gradient
+      out_uv = uv + gn*s*3.6;
+    }
+  }
+  return out_uv;
+}
+// maskAt: 0..1 effect weight confining the effect to a feathered circle.
+// Aspect-corrected + viewport-relative (pos in uv, radius in height units),
+// so the mask scales with ANY screen size — no fixed-width cutoffs.
+// uMaskOn=0 -> always 1 (full-screen, backward compatible).
+// Single-return structure on purpose (X4000 uninitialized-var compilers).
+float maskAt(vec2 uv){
+  float m=1.0;
+  if(uMaskOn>0.5){
+    float ar=uRes.x/uRes.y;
+    vec2 dm=uv-uMaskPos; dm.x*=ar;
+    float dist=length(dm);
+    float r=max(uMaskRadius,0.0001);
+    float inner=r-max(r*uMaskFeather,0.0001);
+    m=1.0-smoothstep(inner,r,dist);
+    m=mix(m,1.0-m,uMaskInvert);
+  }
+  return m;
+}`;
+function effectFrag(fxName){return `${HEADER}${FX[fxName].glsl}void main(){vec4 base=texture2D(uTex,vUv);vec2 uv=trailWarp(vUv);vec4 c=fx(uv);float mm=maskAt(vUv);vec4 o=mix(base,c,mm);o.a*=uOpacity;gl_FragColor=o;}`;}
+
+/* ---- renderer + ping-pong ---- */
+const canvas=document.getElementById('stage');
+const renderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true,premultipliedAlpha:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.6));renderer.setSize(innerWidth,innerHeight);
+const cam=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2));
+const fxScene=new THREE.Scene();fxScene.add(quad);
+function mkRT(){return new THREE.WebGLRenderTarget(innerWidth,innerHeight,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});}
+let rtA=mkRT(),rtB=mkRT();
+
+const copyMat=new THREE.ShaderMaterial({uniforms:{uTex:{value:null},uOpacity:{value:1}},vertexShader:VS,
+  fragmentShader:`precision highp float;varying vec2 vUv;uniform sampler2D uTex;uniform float uOpacity;void main(){vec4 c=texture2D(uTex,vUv);gl_FragColor=vec4(c.rgb,c.a*uOpacity);}`});
+
+function makeSectionRuntime(s,i){
+  const rt={cfg:s, result:mkRT(), tex:new THREE.CanvasTexture(document.createElement('canvas')),
+    canvas:document.createElement('canvas'), images:{}, videos:{}, mats:{},
+    // per-section mouse state (for momentum/spring)
+    mouse:new THREE.Vector2(.5,.5), vel:new THREE.Vector2(0,0), hover:0,
+    trailA:mkRT(), trailB:mkRT(), trailInit:false };
+  rt.canvas.width=1280; rt.canvas.height=800;
+  rt.tex.minFilter=THREE.LinearFilter;
+  return rt;
+}
+const sections=CONFIG.sections.map(makeSectionRuntime);
+
+function normalizeURL(src){
+  try{
+    const u=new URL(src, location.href);
+    u.pathname=u.pathname.split('/').map(seg=>encodeURIComponent(decodeURIComponent(seg))).join('/');
+    return u.href;
+  }catch(e){ return src; }
+}
+function getImage(rt,src){
+  if(!src) return null;
+  if(rt.images[src]!==undefined) return rt.images[src];
+  rt.images[src]=null;
+  const url=src.startsWith('blob:')?src:normalizeURL(src);
+  const img=new Image(); img.crossOrigin='anonymous';
+  img.onload=()=>{ rt.images[src]=img; };
+  img.onerror=()=>{
+    const img2=new Image();
+    img2.onload=()=>{ rt.images[src]=img2; console.warn('[img] loaded without CORS — WebGL may taint. Check Bunny CORS for',url); };
+    img2.onerror=()=>{ rt.images[src]='error'; console.error('[img] failed entirely:',url); };
+    img2.src=url;
+  };
+  img.src=url;
+  return null;
+}
+
+/* video element cache — creates a muted, looping, autoplaying <video> per src.
+   Returns the element once it has a decodable frame, else null. Same CORS rule
+   as images: crossOrigin='anonymous' so WebGL can read its pixels. */
+function getVideo(rt,layer){
+  const src=layer.src;
+  if(!src) return null;
+  if(rt.videos[src]!==undefined){
+    const v=rt.videos[src];
+    if(v && v!=='error'){
+      // keep playback settings in sync with layer toggles
+      v.loop=layer.loop!==false; v.muted=layer.muted!==false;
+      if((layer.autoplay!==false) && v.paused) v.play().catch(()=>{});
+      if((layer.autoplay===false) && !v.paused) v.pause();
+      return (v.readyState>=2)?v:null;   // HAVE_CURRENT_DATA
+    }
+    return null;
+  }
+  rt.videos[src]=null;
+  const url=src.startsWith('blob:')?src:normalizeURL(src);
+  const v=document.createElement('video');
+  v.crossOrigin='anonymous'; v.muted=true; v.loop=layer.loop!==false; v.playsInline=true;
+  v.setAttribute('playsinline',''); v.setAttribute('webkit-playsinline','');
+  v.preload='auto';
+  v.oncanplay=()=>{ rt.videos[src]=v; if(layer.autoplay!==false) v.play().catch(()=>{}); };
+  v.onerror=()=>{ rt.videos[src]='error'; console.error('[video] failed to load:',url,'— check Bunny CORS + format (MP4/H.264 safest)'); };
+  v.src=url;
+  return null;
+}
+
+function drawContent(ctx, layer, rt){
+  if(layer.type==='image'){
+    // background fill: solid color or gradient (also the fallback while image loads / when no src)
+    const bg=layer.bg||{mode:'solid',color:layer.tint||'#15171c',c1:'#241a12',c2:'#FF6A1A',angle:90};
+    if(bg.mode==='gradient'){
+      const a=(bg.angle||0)*Math.PI/180;
+      const cx=640,cy=400,L=760;
+      const dx=Math.cos(a)*L, dy=Math.sin(a)*L;
+      const g=ctx.createLinearGradient(cx-dx,cy-dy,cx+dx,cy+dy);
+      g.addColorStop(0,bg.c1||'#241a12'); g.addColorStop(1,bg.c2||'#FF6A1A');
+      ctx.fillStyle=g;
+    } else {
+      ctx.fillStyle=bg.color||layer.tint||'#15171c';
+    }
+    ctx.fillRect(0,0,1280,800);
+    const img=getImage(rt,layer.src);
+    if(img && img!=='error'){
+      const iw=img.width,ih=img.height,cw=1280,ch=800;
+      const s=(layer.fit==='contain')?Math.min(cw/iw,ch/ih):Math.max(cw/iw,ch/ih);
+      const w=iw*s,h=ih*s; ctx.drawImage(img,(cw-w)/2,(ch-h)/2,w,h);
+    }
+  } else if(layer.type==='video'){
+    ctx.fillStyle=layer.tint||'#0c0e12'; ctx.fillRect(0,0,1280,800);
+    const v=getVideo(rt,layer);
+    if(v){
+      const iw=v.videoWidth||16, ih=v.videoHeight||9, cw=1280, ch=800;
+      const s=(layer.fit==='contain')?Math.min(cw/iw,ch/ih):Math.max(cw/iw,ch/ih);
+      const w=iw*s,h=ih*s;
+      try{ ctx.drawImage(v,(cw-w)/2,(ch-h)/2,w,h); }catch(e){}
+    }
+  } else if(layer.type==='text'){
+    if(layer.content){
+      ctx.fillStyle=layer.color;
+      ctx.font=`${layer.weight} ${layer.size*1.7}px "Hoover","Outfit",system-ui,sans-serif`;
+      ctx.textBaseline='alphabetic';
+      ctx.fillText(layer.content, layer.x/100*1280, layer.y/100*800);
+    }
+  }
+}
+
+function ensureFxMat(layer){
+  if(layer._mat && layer._fx===layer.fx) return layer._mat;
+  const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(innerWidth,innerHeight)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0}};
+  FX[layer.fx].params.forEach(([p])=>u['u'+p[0].toUpperCase()+p.slice(1)]={value:0});
+  layer._mat=new THREE.ShaderMaterial({uniforms:u,vertexShader:VS,fragmentShader:effectFrag(layer.fx),transparent:true,depthWrite:false});
+  layer._fx=layer.fx; return layer._mat;
+}
+
+const ctxCanvas=document.createElement('canvas');ctxCanvas.width=1280;ctxCanvas.height=800;
+const ctx2d=ctxCanvas.getContext('2d');
+const overTex=new THREE.CanvasTexture(ctxCanvas);overTex.minFilter=THREE.LinearFilter;
+const overMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,
+  uniforms:{uBase:{value:null},uOver:{value:null}},vertexShader:VS,
+  fragmentShader:`precision highp float;varying vec2 vUv;uniform sampler2D uBase,uOver;
+    void main(){vec4 b=texture2D(uBase,vUv);vec4 o=texture2D(uOver,vUv);gl_FragColor=mix(b,o,o.a);}`});
+
+/* TRAIL feedback material: reads the previous trail, decays it, stamps a soft
+   dot at the cursor. Output red channel = accumulated wake intensity (0..1). */
+const trailMat=new THREE.ShaderMaterial({
+  uniforms:{uPrev:{value:null},uMouse:{value:new THREE.Vector2(.5,.5)},uDecay:{value:0.9},uRadius:{value:0.06},uAdd:{value:1.0},uAspect:{value:1.0}},
+  vertexShader:VS,
+  fragmentShader:`precision highp float;varying vec2 vUv;uniform sampler2D uPrev;uniform vec2 uMouse;uniform float uDecay,uRadius,uAdd,uAspect;
+    void main(){
+      float prev=texture2D(uPrev,vUv).r * uDecay;       // fade old wake
+      vec2 d=vUv-uMouse; d.x*=uAspect;                  // round stamp
+      float stamp=smoothstep(uRadius,0.0,length(d))*uAdd;
+      float v=max(prev,stamp);
+      gl_FragColor=vec4(v,v,v,1.0);
+    }`});
+function updateTrail(rt,t){
+  const it=rt.cfg.interactivity||{}; const tr=it.trail||{style:'none'};
+  if(tr.style==='none'||!tr.style){ rt.trailInit=false; return; }
+  if(!rt.trailInit){
+    // clear both buffers once
+    quad.material=trailMat; trailMat.uniforms.uPrev.value=rt.trailB.texture; trailMat.uniforms.uAdd.value=0; trailMat.uniforms.uDecay.value=0;
+    renderer.setRenderTarget(rt.trailA); renderer.render(fxScene,cam);
+    renderer.setRenderTarget(rt.trailB); renderer.render(fxScene,cam);
+    rt.trailInit=true;
+  }
+  const decay=Math.min(0.995, (tr.decay??90)/100*0.5+0.5);   // 90 -> ~0.95
+  const radius=((tr.radius??12)/100)*0.5;                     // 12 -> 0.06
+  quad.material=trailMat;
+  trailMat.uniforms.uPrev.value=rt.trailA.texture;
+  trailMat.uniforms.uMouse.value.copy(rt.mouse);
+  trailMat.uniforms.uDecay.value=decay;
+  trailMat.uniforms.uRadius.value=radius;
+  trailMat.uniforms.uAdd.value=1.0;
+  trailMat.uniforms.uAspect.value=innerWidth/innerHeight;
+  renderer.setRenderTarget(rt.trailB); renderer.render(fxScene,cam);
+  [rt.trailA,rt.trailB]=[rt.trailB,rt.trailA];   // ping-pong; trailA is now newest
+}
+const TRAIL_STYLE_ID={none:0,smoke:1,blur:2,ripple:3,displace:4};
+
+function renderSection(rt,t,gt){
+  const layers=rt.cfg.layers;
+  const prog=progIn(rt.cfg.win,gt);
+  let glTex=null;
+  let pingIn=rtA, pingOut=rtB;
+  function contentTexture(drawList){
+    ctx2d.clearRect(0,0,1280,800);
+    drawList.forEach(l=>drawContent(ctx2d,l,rt));
+    const tex=new THREE.CanvasTexture(ctxCanvas);tex.minFilter=THREE.LinearFilter;return tex;
+  }
+  let pending=[];
+  let haveBase=false;
+  function commitContentOverGL(){
+    if(pending.length===0) return;
+    const cTex=contentTexture(pending); pending=[];
+    if(!haveBase){
+      quad.material=copyMat;copyMat.uniforms.uTex.value=cTex;copyMat.uniforms.uOpacity.value=1;
+      renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
+      glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;
+    } else {
+      quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=cTex;
+      renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
+      glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
+    }
+    cTex.dispose();
+  }
+  layers.forEach(layer=>{
+    if(layer.hidden) return;            // eye-toggled off — skip content AND effects
+    if(layer.type==='effect'){
+      commitContentOverGL();
+      if(!haveBase){
+        quad.material=copyMat;copyMat.uniforms.uTex.value=rt.tex;renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;
+      }
+      const mat=ensureFxMat(layer);quad.material=mat;
+      mat.uniforms.uTex.value=glTex;mat.uniforms.uTime.value=t;mat.uniforms.uProg.value=prog;
+      // per-section interactivity feeds the effect's mouse uniforms
+      mat.uniforms.uHover.value=rt.hover;mat.uniforms.uMouse.value.copy(rt.mouse);mat.uniforms.uOpacity.value=1;
+      if(mat.uniforms.uRes)mat.uniforms.uRes.value.set(innerWidth,innerHeight);
+      // trail
+      const tr=(rt.cfg.interactivity&&rt.cfg.interactivity.trail)||{style:'none'};
+      if(mat.uniforms.uTrail){mat.uniforms.uTrail.value=(tr.style&&tr.style!=='none')?rt.trailA.texture:null;}
+      if(mat.uniforms.uTrailStyle)mat.uniforms.uTrailStyle.value=TRAIL_STYLE_ID[tr.style]||0;
+      if(mat.uniforms.uTrailStrength)mat.uniforms.uTrailStrength.value=((tr.strength??50)/100)*0.6;
+      // mask (B1): config x/y are % from top-left (like text layers) -> uv space
+      const mk=layer.mask||{};
+      if(mat.uniforms.uMaskOn)mat.uniforms.uMaskOn.value=mk.on?1:0;
+      if(mk.on&&mat.uniforms.uMaskPos){
+        mat.uniforms.uMaskPos.value.set((mk.x??50)/100,1-(mk.y??50)/100);
+        mat.uniforms.uMaskRadius.value=(mk.radius??30)/100;
+        mat.uniforms.uMaskFeather.value=(mk.feather??40)/100;
+        mat.uniforms.uMaskInvert.value=mk.invert?1:0;
+      }
+      FX[layer.fx].params.forEach(([p,min,max,def])=>{const k='u'+p[0].toUpperCase()+p.slice(1);if(mat.uniforms[k])mat.uniforms[k].value=layer.params[p]??(def!==undefined?def:(min+max)/2);});
+      renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
+      glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
+    } else {
+      pending.push(layer);
+    }
+  });
+  commitContentOverGL();
+  if(glTex){quad.material=copyMat;copyMat.uniforms.uTex.value=glTex;copyMat.uniforms.uOpacity.value=1;renderer.setRenderTarget(rt.result);renderer.render(fxScene,cam);}
+  else{renderer.setRenderTarget(rt.result);renderer.clear();}   // nothing visible → don't show a stale frame
+}
+
+/* transitions — single-canvas crossfades on the global timeline.
+   AUTHORING-ONLY for now: the drop-in export renders sections independently;
+   cross-section transitions are the production R3F path (handoff spec carries
+   transitionOut + transitionParams + transitionEase). Modes:
+   0 dissolve · 1 wipe(→) · 2 zoom · 3 wipe-left · 4 wipe-up · 5 wipe-down
+   6 push-left · 7 push-up · 8 blur · 9 noise · 10 pixelate · 11 burn
+   12 luminance · 13 melt
+   uT1..uT4 are generic per-transition params (meaning per mode, see
+   TRANSITION_DEFS). Every mode resolves to pure A at m=0 and pure B at m=1. */
+const BLEND_FRAG=`precision highp float;varying vec2 vUv;uniform sampler2D uA,uB;uniform float uMix,uMode,uT1,uT2,uT3,uT4;uniform vec2 uRes;
+  ${NOISE_GLSL}
+  vec4 blur9(sampler2D t, vec2 uv, float amt){
+    vec4 acc=texture2D(t,uv);
+    for(int i=0;i<8;i++){
+      float a=float(i)*0.7853981;
+      acc+=texture2D(t,uv+vec2(cos(a),sin(a))*amt);
+    }
+    return acc/9.0;
+  }
+  void main(){
+    vec4 result;
+    float m=uMix;
+    if(uMode<0.5){ result=mix(texture2D(uA,vUv),texture2D(uB,vUv),m); }
+    else if(uMode<1.5){ // wipe → (uT1 softness)
+      float s=max(uT1,0.0008); float sw=m*(1.0+2.0*s)-s;
+      float t=1.0-smoothstep(sw-s,sw+s,vUv.x);
+      result=mix(texture2D(uA,vUv),texture2D(uB,vUv),t); }
+    else if(uMode<2.5){ // zoom (uT1 intensity; 0.3 = legacy behaviour)
+      vec2 ca=(vUv-0.5)/(1.0+m*uT1)+0.5;
+      vec2 cb=(vUv-0.5)/(1.0+uT1-m*uT1)+0.5;
+      result=texture2D(uA,ca)*(1.0-m)+texture2D(uB,cb)*m; }
+    else if(uMode<3.5){ // wipe-left
+      float s=max(uT1,0.0008); float sw=m*(1.0+2.0*s)-s;
+      float t=1.0-smoothstep(sw-s,sw+s,1.0-vUv.x);
+      result=mix(texture2D(uA,vUv),texture2D(uB,vUv),t); }
+    else if(uMode<4.5){ // wipe-up
+      float s=max(uT1,0.0008); float sw=m*(1.0+2.0*s)-s;
+      float t=1.0-smoothstep(sw-s,sw+s,vUv.y);
+      result=mix(texture2D(uA,vUv),texture2D(uB,vUv),t); }
+    else if(uMode<5.5){ // wipe-down
+      float s=max(uT1,0.0008); float sw=m*(1.0+2.0*s)-s;
+      float t=1.0-smoothstep(sw-s,sw+s,1.0-vUv.y);
+      result=mix(texture2D(uA,vUv),texture2D(uB,vUv),t); }
+    else if(uMode<6.5){ // push-left: A slides out left, B enters from the right
+      result=mix(texture2D(uB,vUv-vec2(1.0-m,0.0)),texture2D(uA,vUv+vec2(m,0.0)),step(vUv.x,1.0-m)); }
+    else if(uMode<7.5){ // push-up: A slides off the top, B rises from the bottom
+      result=mix(texture2D(uB,vUv+vec2(0.0,1.0-m)),texture2D(uA,vUv-vec2(0.0,m)),step(m,vUv.y)); }
+    else if(uMode<8.5){ // cross-blur (uT1 peak amount; 0.10 = legacy)
+      float amt=m*(1.0-m)*uT1;
+      result=mix(blur9(uA,vUv,amt),blur9(uB,vUv,amt),m); }
+    else if(uMode<9.5){ // noise dissolve (uT1 scale, uT2 softness)
+      float so=max(uT2,0.01);
+      float n=sn(vUv*uT1)*0.75+sn(vUv*uT1*4.0)*0.25;
+      float th=m*(1.0+2.0*so)-so;
+      float t=1.0-smoothstep(th-so,th+so,n);
+      result=mix(texture2D(uA,vUv),texture2D(uB,vUv),t); }
+    else if(uMode<10.5){ // pixelate: both coarsen to uT1 blocks mid-transition, crossfade through it
+      float p=m*(1.0-m)*4.0;
+      float ar=uRes.x/max(uRes.y,1.0);
+      float cs=p/max(uT1,2.0);                 // cell size in height units at peak = 1/blocks
+      vec2 uv2=vUv;
+      if(cs>0.0008){
+        vec2 g=vec2(vUv.x*ar,vUv.y);
+        g=floor(g/cs)*cs+cs*0.5;
+        uv2=vec2(g.x/ar,g.y);
+      }
+      result=mix(texture2D(uA,uv2),texture2D(uB,uv2),m); }
+    else if(uMode<11.5){ // burn wipe: ragged noise frontier + amber rim (uT1 angle, uT2 roughness, uT3 glow, uT4 scale)
+      float ca=cos(uT1),sa=sin(uT1);
+      float coord=dot(vUv-0.5,vec2(ca,sa))/max(abs(ca)+abs(sa),0.0001)+0.5;   // 0..1 at every angle
+      float n=sn(vUv*uT4)*uT2;
+      float f=coord+n;                          // field in [0, 1+roughness]
+      float s=0.05;
+      float sw=m*(1.0+uT2+2.0*s)-s;
+      float t=1.0-smoothstep(sw-s,sw+s,f);
+      result=mix(texture2D(uA,vUv),texture2D(uB,vUv),t);
+      float ga=clamp(m*(1.0-m)*8.0,0.0,1.0);    // glow only mid-transition, exactly 0 at endpoints
+      float rim=(1.0-smoothstep(0.0,s*2.5,abs(f-sw)))*uT3*ga;
+      result.rgb+=vec3(1.0,0.415,0.102)*rim;    // The Framework amber #FF6A1A
+    }
+    else if(uMode<12.5){ // luminance dissolve: A eats itself by its own light (uT1 softness, uT2 invert)
+      vec4 a=texture2D(uA,vUv);
+      float lum=dot(a.rgb,vec3(0.299,0.587,0.114));
+      float L=mix(1.0-lum,lum,step(0.5,uT2));   // default: highlights first; invert: shadows first
+      float s=max(uT1,0.02);
+      float sw=m*(1.0+2.0*s)-s;
+      float t=1.0-smoothstep(sw-s,sw+s,L);
+      result=mix(a,texture2D(uB,vUv),t); }
+    else { // melt: both frames liquefy through a shared noise field, drip biased downward (uT1 amount, uT2 scale)
+      float w=m*(1.0-m)*4.0;
+      vec2 d=vec2(sn(vUv*uT2+vec2(3.7,1.3)),sn(vUv*uT2+vec2(8.2,4.9)))-0.5;
+      vec2 off=d*uT1*w;
+      off.y+=uT1*w*0.6;                         // sample above -> content slides down
+      result=mix(texture2D(uA,vUv+off),texture2D(uB,vUv-off),m); }
+    gl_FragColor=result;
+  }`;
+const blendMat=new THREE.ShaderMaterial({uniforms:{uA:{value:null},uB:{value:null},uMix:{value:0},uMode:{value:0},uT1:{value:0},uT2:{value:0},uT3:{value:0},uT4:{value:0},uRes:{value:new THREE.Vector2(1,1)}},vertexShader:VS,fragmentShader:BLEND_FRAG});
+/* per-section easing applied to the crossfade mix (JS-side, before the shader) */
+const EASE={linear:m=>m,ease:m=>m*m*(3-2*m),in:m=>m*m,out:m=>1-(1-m)*(1-m)};
+
+function opacityFor(s,t){
+  const a=s.win[0], b=s.win[1];
+  if(t<a||t>b) return 0;
+  const up = s.fadeIn >1e-6 ? Math.min(1,(t-a)/s.fadeIn ) : 1;
+  const dn = s.fadeOut>1e-6 ? Math.min(1,(b-t)/s.fadeOut) : 1;
+  return Math.max(0,Math.min(up,dn));
+}
+function progIn(win,t){if(!win)return 0;const[a,b]=win;return Math.max(0,Math.min(1,(t-a)/Math.max(b-a,1e-6)));}
+
+/* ---- DOM sections + timeline windows from heights ---- */
+const main=document.getElementById('main');
+function recomputeWindows(){
+  const hs=CONFIG.sections.map(s=>s.height);
+  const total=hs.reduce((a,b)=>a+b,0)||1;
+  let acc=0;
+  CONFIG.sections.forEach((s,i)=>{
+    s.win=[acc/total,(acc+hs[i])/total];
+    const tl=(s.transitionLength??40)/100;
+    const maxFade=(s.win[1]-s.win[0])*0.35;
+    s.fade=Math.min(0.12, maxFade)*tl;
+    s.fadeIn=0; s.fadeOut=0;            // set at shared boundaries below
+    acc+=hs[i];
+  });
+  for(let i=0;i<CONFIG.sections.length-1;i++){
+    const c=CONFIG.sections[i], n=CONFIG.sections[i+1];
+    const o=Math.min(c.fade,n.fade);
+    c.win[1]+=o; n.win[0]-=o;
+    /* the ramps span the ENTIRE overlap [B-o, B+o] and are complementary:
+       c's down-ramp + n's up-ramp sum to exactly 1 at every point, so the
+       blend mix sweeps 0→1 linearly. The old model ramped OUTSIDE the
+       windows, leaving a middle zone where both sat at full opacity and the
+       mix froze at 0.5 — the mid-transition hiccup. */
+    c.fadeOut=2*o; n.fadeIn=2*o;
+  }
+}
+function renderDOM(){main.innerHTML='';CONFIG.sections.forEach(s=>{const el=document.createElement('section');el.className='sect';el.style.height=s.height+'svh';main.appendChild(el);});recomputeWindows();if(typeof buildHUD==='function')buildHUD();}
+
+/* ============================================================================
+   ███ UI — A1 restructure ███
+   Three zones, Unicorn-style:
+     LEFT  #tree      — layer tree grouped by section (names only, click = select)
+     RIGHT #inspector — properties of the CURRENT selection only
+   `selected` is the single source of truth: {si, li}. li===null → the section
+   itself is selected (height / transition / interactivity / trail / embed).
+   buildLayerBody() is reused as the inspector body — the proven control
+   builders are unchanged. All listeners attach via createElement/appendChild;
+   no innerHTML+= on live nodes (lesson learned).
+   ============================================================================ */
+const treeEl=document.getElementById('tree'), insEl=document.getElementById('inspector');
+const treeBody=document.getElementById('treeBody');
+const insBody=document.getElementById('insBody'), insTitle=document.getElementById('insTitle');
+/* transition registry: shader mode + tunable params [name,min,max,default].
+   Defaults for the legacy transitions reproduce their pre-params behaviour
+   exactly (zoom 0.3, blur 0.10, noise 6/0.06, wipes hard-edged). Values live
+   per-section in `transitionParams` and ride the handoff spec. */
+const TRANSITION_DEFS={
+  dissolve:    {mode:0, params:[]},
+  noise:       {mode:9, params:[['scale',1,20,6],['softness',0.01,0.25,0.06]]},
+  pixelate:    {mode:10,params:[['blocks',6,200,60]]},
+  burn:        {mode:11,params:[['angle',0,6.28319,0],['roughness',0.02,0.6,0.25],['glow',0,1.5,0.7],['scale',1,20,7]]},
+  luminance:   {mode:12,params:[['softness',0.02,0.4,0.12],['invert',0,1,0]]},
+  melt:        {mode:13,params:[['amount',0.01,0.3,0.12],['scale',1,15,5]]},
+  wipe:        {mode:1, params:[['softness',0,0.3,0]]},
+  'wipe-left': {mode:3, params:[['softness',0,0.3,0]]},
+  'wipe-up':   {mode:4, params:[['softness',0,0.3,0]]},
+  'wipe-down': {mode:5, params:[['softness',0,0.3,0]]},
+  'push-left': {mode:6, params:[]},
+  'push-up':   {mode:7, params:[]},
+  zoom:        {mode:2, params:[['intensity',0.05,1,0.3]]},
+  blur:        {mode:8, params:[['amount',0.02,0.3,0.10]]},
+  none:        {mode:0, params:[]},
+};
+const TRANSITIONS=Object.keys(TRANSITION_DEFS);
+/* resolve a section's transition into shader uniforms: mode + uT1..uT4 */
+function transitionUniforms(s){
+  const def=TRANSITION_DEFS[s.transitionOut]||TRANSITION_DEFS.dissolve;
+  const tp=s.transitionParams||{};
+  const vals=[0,0,0,0];
+  def.params.forEach((p,i)=>{if(i<4)vals[i]=tp[p[0]]??(p[3]!==undefined?p[3]:(p[1]+p[2])/2);});
+  return {mode:def.mode,vals};
+}
+const LAYER_KINDS=['image','video','text','effect'];
+const TYPE_COLOR={image:'var(--img)',video:'var(--vid)',text:'var(--txt)',effect:'var(--fx)'};
+let selected={si:0,li:null};
+
+function layerName(l){return l.label||(l.type==='effect'?l.fx:(l.type==='text'?(l.content||'text'):l.type));}
+function clampSelection(){
+  if(selected.si>=CONFIG.sections.length)selected.si=CONFIG.sections.length-1;
+  if(selected.si<0)selected.si=0;
+  const s=CONFIG.sections[selected.si];
+  if(selected.li!==null&&(selected.li<0||selected.li>=s.layers.length))selected.li=null;
+}
+function select(si,li){if(selected.si===si&&selected.li===li)return;selected={si,li};buildTree();buildInspector();refreshHandles();}
+function buildUI(){buildTree();buildInspector();}
+/* rebuilding handles while a pointer is captured on one of them detaches the
+   node mid-gesture (setPointerCapture InvalidStateError) — so during any
+   canvas drag we defer the rebuild and flush it on pointerup. */
+let handlesDirty=false;
+function refreshHandles(){
+  if(draggingHandle||maskDrag){handlesDirty=true;return;}
+  if(handleSectionIdx>=0)buildHandles(handleSectionIdx);
+}
+
+function subHead(t){const d=document.createElement('div');d.className='sub';d.textContent=t;return d;}
+function rangeRow(name,val,min,max,step,onInput){const w=document.createElement('label');w.className='f';const dec=step<1?2:0;
+  w.innerHTML=`<span>${name}</span><b>${(+val).toFixed(dec)}</b>`;const r=document.createElement('input');r.type='range';r.min=min;r.max=max;r.step=step;r.value=val;
+  r.oninput=()=>{w.querySelector('b').textContent=(+r.value).toFixed(dec);onInput(parseFloat(r.value));};w.appendChild(r);return w;}
+
+/* default interactivity object for older configs */
+function ensureInteractivity(s){
+  if(!s.interactivity) s.interactivity={track:60,momentum:20,spring:30,axes:"both"};
+  return s.interactivity;
+}
+
+/* robust clipboard copy: tries the async Clipboard API, falls back to a
+   temp-textarea + execCommand for iframe / sandboxed contexts (Webflow
+   preview, embedded panes) where navigator.clipboard silently rejects. */
+function copyText(txt, onOk){
+  const done=()=>{ if(onOk)onOk(); };
+  const fallback=()=>{
+    const ta=document.createElement('textarea');
+    ta.value=txt; ta.style.cssText='position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    let ok=false; try{ ok=document.execCommand('copy'); }catch(e){}
+    document.body.removeChild(ta);
+    if(ok) done(); else console.warn('[copy] clipboard blocked — open the tool in a real browser tab to copy');
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(done).catch(fallback);
+  } else { fallback(); }
+}
+
+/* deep clone keeping only plain JSON data — strips any THREE objects,
+   live caches (_mat/_fx), and computed runtime keys (win/fade).
+   This is what prevents "THREE.Texture: Unable to serialize Texture". */
+function cleanData(v){
+  if(Array.isArray(v)) return v.map(cleanData);
+  if(v && typeof v==='object'){
+    // bail on any THREE instance or DOM node
+    if(v.isTexture||v.isMaterial||v.isObject3D||v instanceof Element) return undefined;
+    const out={};
+    for(const k in v){
+      if(k.startsWith('_')||k==='win'||k==='fade'||k==='fadeIn'||k==='fadeOut') continue;
+      const cv=cleanData(v[k]);
+      if(cv!==undefined) out[k]=cv;
+    }
+    return out;
+  }
+  return v;
+}
+
+/* serialize one section to a pasteable block */
+function sectionToText(s){
+  return 'const SECTION = '+JSON.stringify(cleanData(s),null,2)+';';
+}
+
+/* ---- inline rename (double-click a name in the tree) ---- */
+function startRename(span,current,commit){
+  const inp=document.createElement('input');inp.type='text';inp.className='rename';inp.value=current;
+  span.textContent='';span.appendChild(inp);inp.focus();inp.select();
+  let done=false;
+  const finish=ok=>{if(done)return;done=true;commit(ok?inp.value.trim():null);};
+  inp.onkeydown=e=>{e.stopPropagation();if(e.key==='Enter')finish(true);else if(e.key==='Escape')finish(false);};
+  inp.onblur=()=>finish(true);
+  inp.onpointerdown=e=>e.stopPropagation();
+  inp.onclick=e=>e.stopPropagation();
+}
+
+/* ---- drag-to-reorder layers within a section (pointer-based) ----
+   pointerdown on a row arms a drag; >4px vertical movement activates it.
+   While active, an amber insertion line marks the drop slot; release writes
+   the new order into layers[] (display list is front-first = layers reversed).
+   A plain click (no movement) still selects as before. */
+let dragSuppressClick=false;
+function beginLayerDrag(e,si,li,row,group){
+  const startY=e.clientY; let active=false, rows=[], dropDisp=-1;
+  const s=CONFIG.sections[si];
+  function activate(){
+    active=true; dragSuppressClick=true; row.classList.add('dragging');
+    rows=[...group.querySelectorAll('.trow')].map((el,di)=>({el,di,rect:el.getBoundingClientRect()}));
+  }
+  function clearMarks(){rows.forEach(o=>o.el.classList.remove('drop-above','drop-below'));}
+  function move(ev){
+    if(!active){ if(Math.abs(ev.clientY-startY)>4) activate(); else return; }
+    ev.preventDefault();
+    clearMarks(); dropDisp=-1;
+    for(const o of rows){
+      if(ev.clientY < o.rect.top+o.rect.height/2){ dropDisp=o.di; o.el.classList.add('drop-above'); return; }
+    }
+    if(rows.length){ dropDisp=rows.length; rows[rows.length-1].el.classList.add('drop-below'); }
+  }
+  function up(){
+    removeEventListener('pointermove',move); removeEventListener('pointerup',up);
+    if(!active) return;
+    clearMarks(); row.classList.remove('dragging');
+    setTimeout(()=>dragSuppressClick=false,0);   // swallow the trailing click, then re-arm
+    if(dropDisp<0) return;
+    const fromDisp=s.layers.length-1-li;
+    if(dropDisp===fromDisp||dropDisp===fromDisp+1){ buildTree(); return; }  // dropped in place
+    const disp=s.layers.slice().reverse();
+    const [item]=disp.splice(fromDisp,1);
+    let t=dropDisp; if(t>fromDisp)t--;          // account for removal above the slot
+    disp.splice(t,0,item);
+    s.layers.splice(0,s.layers.length,...disp.reverse());
+    selected={si,li:s.layers.indexOf(item)};
+    buildUI(); refreshHandles();
+  }
+  addEventListener('pointermove',move);
+  addEventListener('pointerup',up);
+}
+
+/* ---- LEFT: layer tree ---- */
+function buildTree(){
+  clampSelection();
+  treeBody.innerHTML='';
+  CONFIG.sections.forEach((s,si)=>{
+    const g=document.createElement('div');g.className='tsec';
+    const h=document.createElement('div');h.className='tsec-h'+(selected.si===si&&selected.li===null?' sel':'');
+    const num=document.createElement('span');num.className='num';num.textContent=si+1;
+    const snm=document.createElement('span');snm.className='nm';snm.textContent=s.id;
+    const del=document.createElement('span');del.className='delsec';del.title='delete section';del.textContent='×';
+    h.appendChild(num);h.appendChild(snm);h.appendChild(del);
+    h.onclick=()=>select(si,null);
+    snm.ondblclick=e=>{e.stopPropagation();startRename(snm,s.id,v=>{if(v)s.id=v;buildUI();buildHUD();});};
+    del.onclick=(e)=>{
+      e.preventDefault();e.stopPropagation();
+      if(CONFIG.sections.length<=1)return;  // keep at least one
+      CONFIG.sections.splice(si,1); sections.splice(si,1);
+      if(selected.si>=CONFIG.sections.length)selected={si:CONFIG.sections.length-1,li:null};
+      renderDOM(); buildUI(); refreshHandles();
+    };
+    g.appendChild(h);
+    // front layer at the top of the list, like Unicorn
+    s.layers.slice().reverse().forEach((layer,ri)=>{
+      const li=s.layers.length-1-ri;
+      const r=document.createElement('div');
+      r.className='trow'+(selected.si===si&&selected.li===li?' sel':'')+(layer.hidden?' isHidden':'');
+      const ic=document.createElement('span');ic.className='ic';ic.style.background=TYPE_COLOR[layer.type];
+      const nm=document.createElement('span');nm.className='nm';nm.textContent=layerName(layer);
+      const ty=document.createElement('span');ty.className='ty';ty.textContent=layer.type;
+      const eye=document.createElement('span');eye.className='eye'+(layer.hidden?' off':'');
+      eye.textContent=layer.hidden?'⊘':'⊙';eye.title=layer.hidden?'show layer':'hide layer';
+      r.appendChild(ic);r.appendChild(nm);r.appendChild(ty);r.appendChild(eye);
+      r.onclick=()=>{ if(dragSuppressClick) return; select(si,li); };
+      nm.ondblclick=e=>{
+        e.stopPropagation();
+        const def=layer.type==='effect'?layer.fx:(layer.type==='text'?(layer.content||'text'):layer.type);
+        startRename(nm,layer.label||def,v=>{
+          if(v!==null){ if(v&&v!==def)layer.label=v; else delete layer.label; }
+          buildUI();
+        });
+      };
+      eye.onclick=e=>{e.stopPropagation();layer.hidden=!layer.hidden;if(!layer.hidden)delete layer.hidden;buildUI();refreshHandles();};
+      r.addEventListener('pointerdown',e=>{
+        if(e.button!==0) return;
+        if(e.target===eye||e.target.tagName==='INPUT') return;
+        beginLayerDrag(e,si,li,r,g);
+      });
+      g.appendChild(r);
+    });
+    const add=document.createElement('div');add.className='tree-add';
+    const bar2=document.createElement('div');bar2.className='addbar';
+    const sel=document.createElement('select');LAYER_KINDS.forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent='add '+k;sel.appendChild(o);});
+    const btn=document.createElement('button');btn.textContent='+';
+    btn.onclick=()=>{s.layers.push(newLayer(sel.value));selected={si,li:s.layers.length-1};buildUI();refreshHandles();};
+    bar2.appendChild(sel);bar2.appendChild(btn);add.appendChild(bar2);g.appendChild(add);
+    treeBody.appendChild(g);
+  });
+}
+
+/* ---- RIGHT: inspector ---- */
+function buildInspector(){
+  clampSelection();
+  insBody.innerHTML='';
+  const si=selected.si, s=CONFIG.sections[si], rt=sections[si];
+
+  if(selected.li===null){
+    /* ── section selected ── */
+    insTitle.textContent=`Section ${si+1} · ${s.id}`;
+    insBody.appendChild(subHead('Section id'));
+    const idInput=document.createElement('input');idInput.type='text';idInput.value=s.id;
+    idInput.onchange=()=>{const v=idInput.value.trim();if(v){s.id=v;insTitle.textContent=`Section ${si+1} · ${s.id}`;buildTree();buildHUD();}};
+    insBody.appendChild(idInput);
+
+    insBody.appendChild(subHead('Layout'));
+    insBody.appendChild(rangeRow('Height (svh)',s.height,40,250,1,v=>{s.height=v;renderDOM();}));
+
+    /* ---- interactivity block ---- */
+    const it=ensureInteractivity(s);
+    insBody.appendChild(subHead('Mouse interactivity'));
+    insBody.appendChild(rangeRow('track mouse',it.track,0,100,1,v=>it.track=v));
+    insBody.appendChild(rangeRow('momentum',it.momentum,0,100,1,v=>it.momentum=v));
+    insBody.appendChild(rangeRow('spring',it.spring,0,100,1,v=>it.spring=v));
+    const axWrap=document.createElement('div');axWrap.className='seg';
+    [['x','X only'],['y','Y only'],['both','Both']].forEach(([val,lbl])=>{
+      const b=document.createElement('button');b.textContent=lbl;if(it.axes===val)b.classList.add('on');
+      b.onclick=()=>{it.axes=val;axWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+      axWrap.appendChild(b);
+    });
+    insBody.appendChild(axWrap);
+
+    /* ---- mouse trail (persistent wake) ---- */
+    if(!it.trail) it.trail={style:'none',decay:90,radius:12,strength:50};
+    const tr=it.trail;
+    insBody.appendChild(subHead('Mouse trail'));
+    const trParams=document.createElement('div');
+    function renderTrailParams(){
+      trParams.innerHTML='';
+      if(tr.style&&tr.style!=='none'){
+        trParams.appendChild(rangeRow('decay',tr.decay??90,0,100,1,v=>tr.decay=v));
+        trParams.appendChild(rangeRow('radius',tr.radius??12,1,40,1,v=>tr.radius=v));
+        trParams.appendChild(rangeRow('strength',tr.strength??50,0,100,1,v=>tr.strength=v));
+      }
+    }
+    const styleSel=document.createElement('select');
+    [['none','none'],['smoke','smoke (dissipating)'],['blur','blur / glass smear'],['ripple','ripple wake'],['displace','displacement']].forEach(([v,lbl])=>{
+      const o=document.createElement('option');o.value=v;o.textContent=lbl;if((tr.style||'none')===v)o.selected=true;styleSel.appendChild(o);
+    });
+    styleSel.onchange=()=>{tr.style=styleSel.value;renderTrailParams();};
+    insBody.appendChild(styleSel);
+    renderTrailParams();insBody.appendChild(trParams);
+
+    insBody.appendChild(subHead('Transition → next'));
+    insBody.appendChild(rangeRow('length (%)', s.transitionLength??40, 0, 100, 1, v=>{
+      s.transitionLength=v; recomputeWindows(); buildHUD();
+    }));
+    const tsel=document.createElement('select');TRANSITIONS.forEach(tn=>{const o=document.createElement('option');o.value=tn;o.textContent=tn;if(tn===s.transitionOut)o.selected=true;tsel.appendChild(o);});
+    const tpWrap=document.createElement('div');
+    function renderTransParams(){
+      tpWrap.innerHTML='';
+      const def=TRANSITION_DEFS[s.transitionOut]||{params:[]};
+      if(!s.transitionParams)s.transitionParams={};
+      def.params.forEach(([p,min,max,d])=>{
+        const step=(max-min)/200;
+        tpWrap.appendChild(rangeRow(p,s.transitionParams[p]??(d!==undefined?d:(min+max)/2),min,max,step,v=>s.transitionParams[p]=v));
+      });
+    }
+    tsel.onchange=()=>{s.transitionOut=tsel.value;renderTransParams();};
+    insBody.appendChild(tsel);insBody.appendChild(tpWrap);renderTransParams();
+    const esel=document.createElement('select');esel.style.marginTop='6px';
+    [['linear','easing: linear'],['ease','easing: ease in-out'],['in','easing: ease in'],['out','easing: ease out']].forEach(([v,lbl])=>{
+      const o=document.createElement('option');o.value=v;o.textContent=lbl;if((s.transitionEase||'linear')===v)o.selected=true;esel.appendChild(o);
+    });
+    esel.onchange=()=>{s.transitionEase=esel.value;};insBody.appendChild(esel);
+
+    /* ---- per-section copy ---- */
+    const cp=document.createElement('button');cp.className='seccopy';cp.textContent='⧉ copy this section (drop-in)';
+    cp.onclick=()=>{copyText(sectionEmbed(s),()=>{const o=cp.textContent;cp.textContent='✓ copied drop-in section';setTimeout(()=>cp.textContent=o,1600);});};
+    insBody.appendChild(cp);
+    return;
+  }
+
+  /* ── layer selected ── */
+  const li=selected.li, layer=s.layers[li];
+  insTitle.textContent=`Layer · ${s.id}`;
+  const head=document.createElement('div');head.className='ins-lh';
+  const tyEl=document.createElement('span');tyEl.className='ty';tyEl.textContent=layer.type;tyEl.style.color=TYPE_COLOR[layer.type];
+  const nmEl=document.createElement('span');nmEl.className='nm';nmEl.textContent=layerName(layer);
+  const bEye=document.createElement('button');bEye.textContent=layer.hidden?'⊘':'⊙';bEye.title=layer.hidden?'show layer':'hide layer';
+  bEye.onclick=()=>{layer.hidden=!layer.hidden;if(!layer.hidden)delete layer.hidden;buildUI();refreshHandles();};
+  const bUp=document.createElement('button');bUp.textContent='↑';bUp.title='bring forward';bUp.disabled=(li===s.layers.length-1);
+  const bDn=document.createElement('button');bDn.textContent='↓';bDn.title='send back';bDn.disabled=(li===0);
+  const bRm=document.createElement('button');bRm.textContent='×';bRm.title='delete layer';
+  bUp.onclick=()=>{[s.layers[li+1],s.layers[li]]=[s.layers[li],s.layers[li+1]];selected.li=li+1;buildUI();refreshHandles();};
+  bDn.onclick=()=>{[s.layers[li-1],s.layers[li]]=[s.layers[li],s.layers[li-1]];selected.li=li-1;buildUI();refreshHandles();};
+  bRm.onclick=()=>{s.layers.splice(li,1);selected.li=null;buildUI();refreshHandles();};
+  head.appendChild(tyEl);head.appendChild(nmEl);head.appendChild(bEye);head.appendChild(bUp);head.appendChild(bDn);head.appendChild(bRm);
+  insBody.appendChild(head);
+
+  const body=document.createElement('div');
+  buildLayerBody(body,layer,rt,()=>{buildUI();refreshHandles();});
+  insBody.appendChild(body);
+}
+
+function newLayer(kind){
+  if(kind==='image') return {type:'image',src:'',fit:'cover',tint:'#15171c',bg:{mode:'solid',color:'#15171c',c1:'#241a12',c2:'#FF6A1A',angle:90}};
+  if(kind==='video') return {type:'video',src:'',fit:'cover',tint:'#0c0e12',loop:true,muted:true,autoplay:true};
+  if(kind==='text')  return {type:'text',content:'New text',size:40,weight:600,color:'#ffffff',x:6,y:60};
+  return {type:'effect',fx:'flowfield',params:{scale:3,strength:0.1,speed:0.35}};
+}
+function newSection(n){
+  return { id:'section-'+n, height:100, transitionOut:'dissolve', transitionLength:40,
+    interactivity:{track:60,momentum:20,spring:30,axes:'both'},
+    layers:[
+      { type:'image', src:'', fit:'cover', tint:'#15171c', bg:{mode:'gradient',c1:'#241a12',c2:'#16202b',angle:90} },
+      { type:'text', content:'NEW SECTION', size:64, weight:700, color:'#ffffff', x:6, y:50 }
+    ] };
+}
+function addSection(){
+  const n=CONFIG.sections.length+1;
+  const s=newSection(n);
+  CONFIG.sections.push(s);
+  sections.push(makeSectionRuntime(s, sections.length));  // parallel runtime
+  renderDOM(); selected={si:CONFIG.sections.length-1,li:null}; buildUI(); buildHUD();
+}
+
+function buildLayerBody(el,layer,rt,refresh){
+  if(layer.type==='video'){
+    const urlRow=document.createElement('div');
+    const url=document.createElement('input');url.type='url';url.placeholder='Bunny video URL (MP4)… (press Enter)';url.value=layer.src&&!layer.src.startsWith('blob:')?layer.src:'';
+    const commit=()=>{const v=url.value.trim();layer.src=v;if(v){delete rt.videos[v];getVideo(rt,layer);}};
+    url.onchange=commit; url.addEventListener('keydown',e=>{if(e.key==='Enter')commit();});
+    urlRow.appendChild(url);el.appendChild(urlRow);
+    const up=document.createElement('label');up.className='uploadbtn';up.textContent='⤴ upload video (preview only)';
+    const file=document.createElement('input');file.type='file';file.accept='video/*';file.style.display='none';
+    file.onchange=()=>{const f=file.files[0];if(!f)return;const b=URL.createObjectURL(f);layer.src=b;delete rt.videos[b];getVideo(rt,layer);url.value='(local preview)';};
+    up.appendChild(file);el.appendChild(up);
+    const fitL=document.createElement('label');fitL.className='f';fitL.innerHTML='<span>fit</span>';
+    const fit=document.createElement('select');['cover','contain'].forEach(f=>{const o=document.createElement('option');o.value=f;o.textContent=f;if(f===layer.fit)o.selected=true;fit.appendChild(o);});
+    fit.onchange=()=>{layer.fit=fit.value;};fitL.appendChild(fit);el.appendChild(fitL);
+    // playback toggles
+    const seg=document.createElement('div');seg.className='seg';
+    [['loop','loop'],['muted','muted'],['autoplay','play']].forEach(([k,lbl])=>{
+      const b=document.createElement('button');b.textContent=lbl;if(layer[k]!==false)b.classList.add('on');
+      b.onclick=()=>{layer[k]=!(layer[k]!==false);b.classList.toggle('on');delete rt.videos[layer.src];getVideo(rt,layer);};
+      seg.appendChild(b);
+    });
+    el.appendChild(seg);
+    el.appendChild(note('Bunny video URL persists in the config. MP4/H.264 is safest across browsers; WebM for smaller files. Muted is required for autoplay. Upload is local preview only.'));
+    return;
+  }
+  if(layer.type==='image'){
+    const urlRow=document.createElement('div');
+    const url=document.createElement('input');url.type='url';url.placeholder='Bunny image URL… (press Enter)';url.value=layer.src&&!layer.src.startsWith('blob:')?layer.src:'';
+    const commit=()=>{const v=url.value.trim();layer.src=v;if(v){delete rt.images[v];getImage(rt,v);}};
+    url.onchange=commit;
+    url.addEventListener('keydown',e=>{if(e.key==='Enter')commit();});
+    urlRow.appendChild(url);el.appendChild(urlRow);
+    const up=document.createElement('label');up.className='uploadbtn';up.textContent='⤴ upload (preview only)';
+    const file=document.createElement('input');file.type='file';file.accept='image/*';file.style.display='none';
+    file.onchange=()=>{const f=file.files[0];if(!f)return;const b=URL.createObjectURL(f);layer.src=b;delete rt.images[b];getImage(rt,b);url.value='(local preview)';};
+    up.appendChild(file);el.appendChild(up);
+    const fitL=document.createElement('label');fitL.className='f';fitL.innerHTML='<span>fit</span>';
+    const fit=document.createElement('select');['cover','contain'].forEach(f=>{const o=document.createElement('option');o.value=f;o.textContent=f;if(f===layer.fit)o.selected=true;fit.appendChild(o);});
+    fit.onchange=()=>{layer.fit=fit.value;};fitL.appendChild(fit);el.appendChild(fitL);
+
+    /* ---- background fill (shows when no image, or behind a contained image) ---- */
+    if(!layer.bg) layer.bg={mode:'solid',color:layer.tint||'#15171c',c1:'#241a12',c2:'#FF6A1A',angle:90};
+    const bg=layer.bg;
+    el.appendChild(subHead('Background fill'));
+    const modeWrap=document.createElement('div');modeWrap.className='seg';
+    const fields=document.createElement('div');
+    function renderBgFields(){
+      fields.innerHTML='';
+      if(bg.mode==='gradient'){
+        const r1=document.createElement('label');r1.className='f';r1.innerHTML='<span>color 1</span>';
+        const i1=document.createElement('input');i1.type='color';i1.value=bg.c1;i1.style.cssText='width:30px;height:22px;border:none;background:none;padding:0;cursor:pointer';
+        i1.oninput=()=>bg.c1=i1.value;r1.appendChild(i1);fields.appendChild(r1);
+        const r2=document.createElement('label');r2.className='f';r2.innerHTML='<span>color 2</span>';
+        const i2=document.createElement('input');i2.type='color';i2.value=bg.c2;i2.style.cssText='width:30px;height:22px;border:none;background:none;padding:0;cursor:pointer';
+        i2.oninput=()=>bg.c2=i2.value;r2.appendChild(i2);fields.appendChild(r2);
+        fields.appendChild(rangeRow('angle',bg.angle??90,0,360,1,v=>bg.angle=v));
+      } else {
+        const r1=document.createElement('label');r1.className='f';r1.innerHTML='<span>color</span>';
+        const i1=document.createElement('input');i1.type='color';i1.value=bg.color;i1.style.cssText='width:30px;height:22px;border:none;background:none;padding:0;cursor:pointer';
+        i1.oninput=()=>bg.color=i1.value;r1.appendChild(i1);fields.appendChild(r1);
+      }
+    }
+    [['solid','Solid'],['gradient','Gradient']].forEach(([val,lbl])=>{
+      const b=document.createElement('button');b.textContent=lbl;if((bg.mode||'solid')===val)b.classList.add('on');
+      b.onclick=()=>{bg.mode=val;modeWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');renderBgFields();};
+      modeWrap.appendChild(b);
+    });
+    el.appendChild(modeWrap);el.appendChild(fields);renderBgFields();
+
+    el.appendChild(note('Bunny URL persists in the config. Upload is local preview only — paste the URL to make it permanent.'));
+  } else if(layer.type==='text'){
+    const tRow=document.createElement('div');const t=document.createElement('input');t.type='text';t.value=layer.content;t.placeholder='text…';
+    t.oninput=()=>{layer.content=t.value;if(handleSectionIdx>=0)buildHandles(handleSectionIdx);buildTree();};tRow.appendChild(t);el.appendChild(tRow);
+    el.appendChild(rangeRow('size (px)',layer.size,16,160,1,v=>layer.size=v));
+    el.appendChild(rangeRow('weight',layer.weight,100,900,100,v=>layer.weight=v));
+    // find this layer's section + index so the drag-handle can sync the readouts
+    const _si=CONFIG.sections.indexOf(CONFIG.sections.find(s=>s.layers.includes(layer)));
+    const _li=_si>=0?CONFIG.sections[_si].layers.indexOf(layer):-1;
+    const rx=rangeRow('pos x (%)',layer.x,0,100,1,v=>{layer.x=v;if(handleSectionIdx>=0)buildHandles(handleSectionIdx);});
+    rx.setAttribute('data-tpos',_si+'-'+_li);rx.setAttribute('data-axis','x');el.appendChild(rx);
+    const ry=rangeRow('pos y (%)',layer.y,0,100,1,v=>{layer.y=v;if(handleSectionIdx>=0)buildHandles(handleSectionIdx);});
+    ry.setAttribute('data-tpos',_si+'-'+_li);ry.setAttribute('data-axis','y');el.appendChild(ry);
+    const cl=document.createElement('label');cl.className='f';cl.innerHTML='<span>color</span>';
+    const c=document.createElement('input');c.type='color';c.value=layer.color;c.style.cssText='width:30px;height:22px;border:none;background:none;padding:0;cursor:pointer';
+    c.oninput=()=>{layer.color=c.value;};cl.appendChild(c);el.appendChild(cl);
+  } else {
+    const fl=document.createElement('label');fl.className='f';fl.innerHTML='<span>effect</span>';
+    const fsel=document.createElement('select');FX_NAMES.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if(n===layer.fx)o.selected=true;fsel.appendChild(o);});
+    fsel.onchange=()=>{layer.fx=fsel.value;layer.params={};FX[layer.fx].params.forEach(([p,min,max,def])=>layer.params[p]=def!==undefined?def:(min+max)/2);refresh();};
+    fl.appendChild(fsel);el.appendChild(fl);
+    FX[layer.fx].params.forEach(([p,min,max,def])=>{const step=(max-min)/200;el.appendChild(rangeRow(p,layer.params[p]??(def!==undefined?def:(min+max)/2),min,max,step,v=>layer.params[p]=v));});
+
+    /* ---- mask (B1): confine the effect to a feathered circle ----
+       Position in % of viewport, radius in % of viewport HEIGHT — fully
+       responsive, scales with any screen. mask.on=false (or absent) = the
+       classic full-screen behaviour, so old configs render unchanged. */
+    if(!layer.mask) layer.mask={on:false,x:50,y:50,radius:30,feather:40,invert:false};
+    const mk=layer.mask;
+    el.appendChild(subHead('Mask (effect area)'));
+    const mWrap=document.createElement('div');mWrap.className='seg';
+    const mFields=document.createElement('div');
+    function renderMaskFields(){
+      mFields.innerHTML='';
+      if(!mk.on) return;
+      const rx=rangeRow('pos x (%)',mk.x??50,0,100,1,v=>{mk.x=v;refreshHandles();});
+      rx.setAttribute('data-mrow','x');mFields.appendChild(rx);
+      const ry=rangeRow('pos y (%)',mk.y??50,0,100,1,v=>{mk.y=v;refreshHandles();});
+      ry.setAttribute('data-mrow','y');mFields.appendChild(ry);
+      const rr=rangeRow('radius',mk.radius??30,1,150,1,v=>{mk.radius=v;refreshHandles();});
+      rr.setAttribute('data-mrow','radius');mFields.appendChild(rr);
+      mFields.appendChild(rangeRow('feather',mk.feather??40,0,100,1,v=>mk.feather=v));
+      const inv=document.createElement('div');inv.className='seg';
+      [[false,'normal'],[true,'inverted']].forEach(([val,lbl])=>{
+        const b=document.createElement('button');b.textContent=lbl;if(!!mk.invert===val)b.classList.add('on');
+        b.onclick=()=>{mk.invert=val;inv.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+        inv.appendChild(b);
+      });
+      mFields.appendChild(inv);
+      mFields.appendChild(note('Drag the amber dot on the canvas to move the mask; the rim grip resizes it. Viewport-relative — scales with any screen size.'));
+    }
+    [[false,'Full screen'],[true,'Circle']].forEach(([val,lbl])=>{
+      const b=document.createElement('button');b.textContent=lbl;if(!!mk.on===val)b.classList.add('on');
+      b.onclick=()=>{mk.on=val;mWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');renderMaskFields();refreshHandles();};
+      mWrap.appendChild(b);
+    });
+    el.appendChild(mWrap);el.appendChild(mFields);renderMaskFields();
+
+    /* mouse interactivity lives on the SECTION (it feeds every effect in the
+       section via uMouse/uHover) — link there so it's discoverable from here. */
+    el.appendChild(subHead('Mouse interactivity'));
+    const goSec=document.createElement('button');goSec.className='seccopy';goSec.style.marginTop='4px';
+    goSec.textContent='⚙ edit in section settings';
+    goSec.onclick=()=>{const _sx=CONFIG.sections.findIndex(sx=>sx.layers.includes(layer));if(_sx>=0)select(_sx,null);};
+    el.appendChild(goSec);
+    el.appendChild(note('Track / momentum / spring / axes / trail are section-level — they drive all effects in this section through uMouse + uHover.'));
+  }
+}
+function note(t){const d=document.createElement('div');d.className='note';d.textContent=t;return d;}
+
+/* ---- toolbar / panel toggles ---- */
+document.getElementById('dockToggle').onclick=()=>document.body.classList.remove('ui-closed');
+document.getElementById('closeUI').onclick=()=>document.body.classList.add('ui-closed');
+/* dev UI (handles + scroll HUD) — ON in the authoring tool, OFF on export. */
+let showDevUI=true;
+const devBtn=document.getElementById('devToggle');
+function applyDevUI(){ document.body.classList.toggle('no-dev', !showDevUI); devBtn.classList.toggle('off', !showDevUI); devBtn.textContent=(showDevUI?'◉':'○')+' dev UI'; }
+devBtn.onclick=()=>{ showDevUI=!showDevUI; applyDevUI(); };
+applyDevUI();
+/* preview mode — hide ALL authoring UI to see the final result; restore pill brings it back (no reload needed). */
+document.getElementById('hideAll').onclick=()=>{ document.body.classList.add('preview'); };
+document.getElementById('showUI').onclick=()=>{ document.body.classList.remove('preview'); };
+
+/* ---- canvas zoom (authoring-only; never exported) ----
+   Scales the #viewport wrapper (canvas + handle overlay) around its center.
+   Zoom out to see the full composition between the panels; zoom in for detail.
+   ALL canvas-space pointer math must invert this scale — vpPoint() is the
+   single place that mapping lives. At zoom=1 it is the identity. */
+let zoom=1;
+const vpEl=document.getElementById('viewport');
+function vpPoint(e){const cx=innerWidth/2,cy=innerHeight/2;return{x:cx+(e.clientX-cx)/zoom,y:cy+(e.clientY-cy)/zoom};}
+function applyZoom(){
+  vpEl.style.transform=zoom===1?'':'scale('+zoom+')';
+  vpEl.classList.toggle('scaled',zoom!==1);
+  document.getElementById('zoomPct').textContent=Math.round(zoom*100)+'%';
+}
+document.getElementById('zoomIn').onclick=()=>{zoom=Math.min(2,Math.round((zoom+0.1)*10)/10);applyZoom();};
+document.getElementById('zoomOut').onclick=()=>{zoom=Math.max(0.3,Math.round((zoom-0.1)*10)/10);applyZoom();};
+document.getElementById('zoomPct').onclick=()=>{zoom=1;applyZoom();};
+applyZoom();
+
+/* ============================================================================
+   EXPORT GENERATORS — shared-loader model.
+   • copyEngine() emits a standalone <script> (paste ONCE per project). It
+     carries Three.js + the SAME shader code used here, and renders every
+     <div data-fw-section='{config}'> it finds into its own pinned canvas.
+   • sectionEmbed(s) emits a drop-in <section> with that div + no global tags.
+   The two are generated from the live FX/VS/NOISE source so they never drift
+   from the authoring tool's behaviour.
+   ============================================================================ */
+function fxRegistrySource(){
+  // rebuild the FX object as source text (params arrays + glsl strings)
+  let parts=[];
+  for(const name in FX){
+    const f=FX[name];
+    const params=JSON.stringify(f.params);
+    // glsl may contain ${NOISE_GLSL}; bake it in literally
+    const glsl=f.glsl.replace('${NOISE_GLSL}', NOISE_GLSL);
+    parts.push(`${name}:{params:${params},glsl:${JSON.stringify(glsl)}}`);
+  }
+  return '{'+parts.join(',\n')+'}';
+}
+
+function engineSource(){
+  return `<!-- ╔═ THE FRAMEWORK · spine engine ═╗  paste ONCE per project (e.g. site-wide <head>). -->
+<script type="importmap">
+{ "imports": { "three":"https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" }}
+<\/script>
+<script type="module">
+import * as THREE from "three";
+const VS=${JSON.stringify(VS)};
+const FX=${fxRegistrySource()};
+const HEADER=${JSON.stringify(HEADER)};
+function effectFrag(n){return HEADER+FX[n].glsl+"void main(){vec4 base=texture2D(uTex,vUv);vec2 uv=trailWarp(vUv);vec4 c=fx(uv);float mm=maskAt(vUv);vec4 o=mix(base,c,mm);o.a*=uOpacity;gl_FragColor=o;}";}
+
+// render one section config into one canvas, driven by scroll over its host element
+function mountSection(host){
+  let cfg; try{ cfg=JSON.parse(host.getAttribute('data-fw-section')); }catch(e){ return; }
+  const canvas=document.createElement('canvas');
+  canvas.style.cssText='position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0';
+  host.style.position='relative'; host.prepend(canvas);
+  const renderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true,premultipliedAlpha:false});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,1.6));
+  const cam=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+  const quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2));
+  const scene=new THREE.Scene(); scene.add(quad);
+  const mkRT=()=>new THREE.WebGLRenderTarget(1,1,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});
+  let rtA=mkRT(),rtB=mkRT();
+  let trailA=mkRT(),trailB=mkRT(),trailInit=false;
+  const TRAIL_ID={none:0,smoke:1,blur:2,ripple:3,displace:4};
+  const trailMat=new THREE.ShaderMaterial({uniforms:{uPrev:{value:null},uMouse:{value:new THREE.Vector2(.5,.5)},uDecay:{value:0.9},uRadius:{value:0.06},uAdd:{value:1.0},uAspect:{value:1.0}},vertexShader:VS,
+    fragmentShader:"precision highp float;varying vec2 vUv;uniform sampler2D uPrev;uniform vec2 uMouse;uniform float uDecay,uRadius,uAdd,uAspect;void main(){float prev=texture2D(uPrev,vUv).r*uDecay;vec2 d=vUv-uMouse;d.x*=uAspect;float stamp=smoothstep(uRadius,0.0,length(d))*uAdd;float v=max(prev,stamp);gl_FragColor=vec4(v,v,v,1.0);}"});
+  const copyMat=new THREE.ShaderMaterial({uniforms:{uTex:{value:null},uOpacity:{value:1}},vertexShader:VS,
+    fragmentShader:"precision highp float;varying vec2 vUv;uniform sampler2D uTex;uniform float uOpacity;void main(){vec4 c=texture2D(uTex,vUv);gl_FragColor=vec4(c.rgb,c.a*uOpacity);}"});
+  const overMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{uBase:{value:null},uOver:{value:null}},vertexShader:VS,
+    fragmentShader:"precision highp float;varying vec2 vUv;uniform sampler2D uBase,uOver;void main(){vec4 b=texture2D(uBase,vUv);vec4 o=texture2D(uOver,vUv);gl_FragColor=mix(b,o,o.a);}"});
+  const ctxCanvas=document.createElement('canvas');ctxCanvas.width=1280;ctxCanvas.height=800;const ctx2d=ctxCanvas.getContext('2d');
+  const images={}, videos={}, mouse=new THREE.Vector2(.5,.5), vel=new THREE.Vector2(0,0); let hover=0;
+  function getImage(src){ if(!src)return null; if(images[src]!==undefined)return images[src]; images[src]=null;
+    const img=new Image(); img.crossOrigin='anonymous'; img.onload=()=>images[src]=img; img.onerror=()=>{const i2=new Image();i2.onload=()=>images[src]=i2;i2.onerror=()=>images[src]='error';i2.src=src;}; img.src=src; return null; }
+  function getVideo(layer){ const src=layer.src; if(!src)return null;
+    if(videos[src]!==undefined){const v=videos[src]; if(v&&v!=='error'){v.loop=layer.loop!==false;v.muted=layer.muted!==false;if((layer.autoplay!==false)&&v.paused)v.play().catch(()=>{});if((layer.autoplay===false)&&!v.paused)v.pause();return (v.readyState>=2)?v:null;} return null;}
+    videos[src]=null; const v=document.createElement('video'); v.crossOrigin='anonymous'; v.muted=true; v.loop=layer.loop!==false; v.playsInline=true; v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.preload='auto';
+    v.oncanplay=()=>{videos[src]=v;if(layer.autoplay!==false)v.play().catch(()=>{});}; v.onerror=()=>{videos[src]='error';console.error('[video] failed:',src);}; v.src=src; return null; }
+  function drawContent(layer){
+    if(layer.type==='image'){
+      const bg=layer.bg||{mode:'solid',color:layer.tint||'#15171c'};
+      if(bg.mode==='gradient'){const a=(bg.angle||0)*Math.PI/180,cx=640,cy=400,L=760,dx=Math.cos(a)*L,dy=Math.sin(a)*L;const g=ctx2d.createLinearGradient(cx-dx,cy-dy,cx+dx,cy+dy);g.addColorStop(0,bg.c1||'#241a12');g.addColorStop(1,bg.c2||'#FF6A1A');ctx2d.fillStyle=g;}
+      else ctx2d.fillStyle=bg.color||layer.tint||'#15171c';
+      ctx2d.fillRect(0,0,1280,800);
+      const img=getImage(layer.src);
+      if(img&&img!=='error'){const iw=img.width,ih=img.height,s=(layer.fit==='contain')?Math.min(1280/iw,800/ih):Math.max(1280/iw,800/ih);ctx2d.drawImage(img,(1280-iw*s)/2,(800-ih*s)/2,iw*s,ih*s);}
+    } else if(layer.type==='video'){
+      ctx2d.fillStyle=layer.tint||'#0c0e12';ctx2d.fillRect(0,0,1280,800);
+      const v=getVideo(layer);
+      if(v){const iw=v.videoWidth||16,ih=v.videoHeight||9,s=(layer.fit==='contain')?Math.min(1280/iw,800/ih):Math.max(1280/iw,800/ih);try{ctx2d.drawImage(v,(1280-iw*s)/2,(800-ih*s)/2,iw*s,ih*s);}catch(e){}}
+    } else if(layer.type==='text'&&layer.content){
+      ctx2d.fillStyle=layer.color;ctx2d.font=layer.weight+' '+(layer.size*1.7)+'px "Hoover","Outfit",system-ui,sans-serif';ctx2d.textBaseline='alphabetic';ctx2d.fillText(layer.content,layer.x/100*1280,layer.y/100*800);
+    }
+  }
+  function ensureMat(layer){ if(layer._mat&&layer._fx===layer.fx)return layer._mat;
+    const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(1,1)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0}};
+    FX[layer.fx].params.forEach(p=>u['u'+p[0][0].toUpperCase()+p[0].slice(1)]={value:0});
+    layer._mat=new THREE.ShaderMaterial({uniforms:u,vertexShader:VS,fragmentShader:effectFrag(layer.fx),transparent:true,depthWrite:false});layer._fx=layer.fx;return layer._mat; }
+  function contentTexture(list){ctx2d.clearRect(0,0,1280,800);list.forEach(drawContent);const t=new THREE.CanvasTexture(ctxCanvas);t.minFilter=THREE.LinearFilter;return t;}
+  function updateTrail(W,H,time){
+    const trcfg=(cfg.interactivity&&cfg.interactivity.trail)||{style:'none'};
+    if(!trcfg.style||trcfg.style==='none'){trailInit=false;return;}
+    if(trailA.width!==W||trailA.height!==H){trailA.setSize(W,H);trailB.setSize(W,H);}
+    if(!trailInit){trailMat.uniforms.uPrev.value=trailB.texture;trailMat.uniforms.uAdd.value=0;trailMat.uniforms.uDecay.value=0;quad.material=trailMat;renderer.setRenderTarget(trailA);renderer.render(scene,cam);renderer.setRenderTarget(trailB);renderer.render(scene,cam);trailInit=true;}
+    const decay=Math.min(0.995,(trcfg.decay??90)/100*0.5+0.5);
+    const radius=((trcfg.radius??12)/100)*0.5;
+    quad.material=trailMat;trailMat.uniforms.uPrev.value=trailA.texture;trailMat.uniforms.uMouse.value.copy(mouse);trailMat.uniforms.uDecay.value=decay;trailMat.uniforms.uRadius.value=radius;trailMat.uniforms.uAdd.value=1.0;trailMat.uniforms.uAspect.value=W/H;
+    renderer.setRenderTarget(trailB);renderer.render(scene,cam);[trailA,trailB]=[trailB,trailA];
+  }
+  function render(prog,time){
+    const W=host.clientWidth,H=host.clientHeight;
+    if(W<2||H<2) return;   // layout not ready yet
+    if(canvas.width!==W||canvas.height!==H){renderer.setSize(W,H,false);rtA.setSize(W,H);rtB.setSize(W,H);}
+    updateTrail(W,H,time);
+    const trcfg=(cfg.interactivity&&cfg.interactivity.trail)||{style:'none'};
+    const trActive=trcfg.style&&trcfg.style!=='none';
+    let glTex=null,pingOut=rtB,pingIn=rtA,pending=[],haveBase=false;
+    function commit(){ if(!pending.length)return; const c=contentTexture(pending);pending=[];
+      if(!haveBase){quad.material=copyMat;copyMat.uniforms.uTex.value=c;copyMat.uniforms.uOpacity.value=1;renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;}
+      else{quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=c;renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];}
+      c.dispose(); }
+    cfg.layers.forEach(layer=>{
+      if(layer.hidden) return;
+      if(layer.type==='effect'){commit(); if(!haveBase){const c=contentTexture([]);quad.material=copyMat;copyMat.uniforms.uTex.value=c;renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;c.dispose();}
+        const m=ensureMat(layer);quad.material=m;m.uniforms.uTex.value=glTex;m.uniforms.uTime.value=time;m.uniforms.uProg.value=prog;m.uniforms.uHover.value=hover;m.uniforms.uMouse.value.copy(mouse);m.uniforms.uOpacity.value=1;if(m.uniforms.uRes)m.uniforms.uRes.value.set(W,H);
+        if(m.uniforms.uTrail)m.uniforms.uTrail.value=trActive?trailA.texture:null;
+        if(m.uniforms.uTrailStyle)m.uniforms.uTrailStyle.value=TRAIL_ID[trcfg.style]||0;
+        if(m.uniforms.uTrailStrength)m.uniforms.uTrailStrength.value=((trcfg.strength??50)/100)*0.6;
+        const mk=layer.mask||{};
+        if(m.uniforms.uMaskOn)m.uniforms.uMaskOn.value=mk.on?1:0;
+        if(mk.on&&m.uniforms.uMaskPos){m.uniforms.uMaskPos.value.set((mk.x??50)/100,1-(mk.y??50)/100);m.uniforms.uMaskRadius.value=(mk.radius??30)/100;m.uniforms.uMaskFeather.value=(mk.feather??40)/100;m.uniforms.uMaskInvert.value=mk.invert?1:0;}
+        FX[layer.fx].params.forEach(p=>{const k='u'+p[0][0].toUpperCase()+p[0].slice(1);if(m.uniforms[k])m.uniforms[k].value=layer.params[p[0]]??(p.length>3?p[3]:((p[1]+p[2])/2));});
+        renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
+      } else pending.push(layer);
+    });
+    commit();
+    if(glTex){quad.material=copyMat;copyMat.uniforms.uTex.value=glTex;copyMat.uniforms.uOpacity.value=1;renderer.setRenderTarget(null);renderer.render(scene,cam);}
+    else{renderer.setRenderTarget(null);renderer.clear();}
+  }
+  // interactivity integrate
+  let mRaw=new THREE.Vector2(.5,.5),hRaw=0;
+  host.addEventListener('pointermove',e=>{const r=host.getBoundingClientRect();mRaw.set((e.clientX-r.left)/r.width,1-(e.clientY-r.top)/r.height);hRaw=1;});
+  host.addEventListener('pointerleave',()=>hRaw=0);
+  const it=cfg.interactivity||{track:0,momentum:0,spring:30,axes:'both'};
+  function stepMouse(){const tr=(it.track||0)/100,mo=(it.momentum||0)/100,sp=(it.spring||0)/100;let tx=mRaw.x,ty=mRaw.y;if(it.axes==='x')ty=.5;if(it.axes==='y')tx=.5;const k=.04+sp*.30,dmp=.85-mo*.20;vel.x=(vel.x+(tx-mouse.x)*k)*dmp;vel.y=(vel.y+(ty-mouse.y)*k)*dmp;mouse.x+=vel.x;mouse.y+=vel.y;hover+=((hRaw*tr)-hover)*.1;}
+  const clock=new THREE.Clock();
+  function loop(){requestAnimationFrame(loop);
+    const r=host.getBoundingClientRect();const vh=innerHeight;
+    // progress 0..1 as the host scrolls through the viewport
+    const prog=Math.max(0,Math.min(1,(vh-r.top)/(vh+r.height)));
+    const visible=r.bottom>0&&r.top<vh;
+    if(visible){stepMouse();render(prog,clock.getElapsedTime());}
+  }
+  loop();
+}
+function mountAll(){document.querySelectorAll('[data-fw-section]:not([data-fw-mounted])').forEach(el=>{el.setAttribute('data-fw-mounted','1');mountSection(el);});}
+// expose immediately so section embeds can call it whenever they run
+window.__FW_SPINE={mountAll};
+// drain any queued mount requests that ran before this engine loaded
+if(window.__FW_QUEUE){window.__FW_QUEUE.forEach(()=>{});window.__FW_QUEUE=null;}
+// mount now (module scripts are deferred, so DOM is usually ready here) ...
+mountAll();
+// ... and again on DOMContentLoaded if it hasn't fired yet ...
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mountAll);
+// ... and on full load, plus a couple of retries for late-injected embeds (Webflow).
+window.addEventListener('load',mountAll);
+let __fwTries=0;const __fwRetry=setInterval(()=>{mountAll();if(++__fwTries>6)clearInterval(__fwRetry);},400);
+<\/script>
+<!-- ╚═ end engine ═╝ -->`;
+}
+
+function sectionEmbed(s){
+  const clean=cleanData(s);
+  const json=JSON.stringify(clean).replace(/'/g,"&#39;");
+  return `<!-- ░ THE FRAMEWORK section: ${clean.id} ░  requires the spine engine pasted once in the page <head>. -->
+<section class="fw-section" style="position:relative;min-height:${clean.height}svh;height:${clean.height}svh">
+  <div data-fw-section='${json}' style="position:absolute;top:0;left:0;width:100%;height:100%"></div>
+</section>
+<script>
+/* mount now if the engine is already loaded; otherwise the engine's own
+   retry loop will pick this section up once it loads. Safe either way. */
+(function(){function go(){window.__FW_SPINE&&window.__FW_SPINE.mountAll&&window.__FW_SPINE.mountAll();}
+if(document.readyState!=='loading')go();else document.addEventListener('DOMContentLoaded',go);
+setTimeout(go,300);setTimeout(go,1000);})();
+<\/script>`;
+}
+
+
+document.getElementById('addSection').onclick=()=>addSection();
+document.getElementById('copyEngine').onclick=()=>{const b=document.getElementById('copyEngine');copyText(engineSource(),()=>{const o=b.textContent;b.textContent='✓ engine copied';setTimeout(()=>b.textContent=o,1600);});};
+document.getElementById('copyCfg').onclick=()=>{const txt='const CONFIG = '+JSON.stringify(cleanData(CONFIG),null,2)+';';
+  copyText(txt,()=>{const b=document.getElementById('copyCfg');const o=b.textContent;b.textContent='✓ copied';setTimeout(()=>b.textContent=o,1400);});};
+
+/* HUD */
+const bar=document.getElementById('bar');const palette=['#FF6A1A','#7aa2ff','#ff5ab0','#9CFFC4'];
+const ph=document.createElement('div');ph.className='ph';
+function buildHUD(){bar.innerHTML='';bar.appendChild(ph);CONFIG.sections.forEach((s,i)=>{const[a,b]=s.win;const band=document.createElement('div');band.className='band';band.style.left=(a*100)+'%';band.style.width=((b-a)*100)+'%';band.style.background=palette[i%4]+'22';band.style.color=palette[i%4];band.textContent=s.id;bar.appendChild(band);});}
+
+/* scroll + input */
+let target=scrollY,smooth=scrollY,smoothing=!matchMedia('(pointer:coarse)').matches;
+const maxScroll=()=>document.body.scrollHeight-innerHeight;
+function uiHovered(){return treeEl.matches(':hover')||insEl.matches(':hover');}
+addEventListener('wheel',e=>{if(!smoothing||uiHovered())return;e.preventDefault();target=Math.max(0,Math.min(target+e.deltaY,maxScroll()));},{passive:false});
+addEventListener('scroll',()=>{if(!smoothing)target=scrollY;},{passive:true});
+
+/* A3: the timeline strip is interactive — click anywhere on the bar to jump,
+   drag to scrub the whole site scroll. Bands stay informational (pointer
+   events pass through them to the bar). */
+(function(){
+  let scrubbing=false;
+  function scrubTo(clientX){
+    const r=bar.getBoundingClientRect();
+    const gt=Math.max(0,Math.min(1,(clientX-r.left)/Math.max(r.width,1)));
+    const y=gt*maxScroll();
+    if(smoothing){target=y;} else {window.scrollTo(0,y);}
+  }
+  bar.addEventListener('pointerdown',e=>{e.preventDefault();scrubbing=true;try{bar.setPointerCapture(e.pointerId);}catch(_){ }scrubTo(e.clientX);});
+  bar.addEventListener('pointermove',e=>{if(scrubbing)scrubTo(e.clientX);});
+  bar.addEventListener('pointerup',()=>{scrubbing=false;});
+  bar.addEventListener('pointercancel',()=>{scrubbing=false;});
+})();
+let mouseRaw=new THREE.Vector2(.5,.5),hoverRaw=0;
+addEventListener('pointermove',e=>{const p=vpPoint(e);mouseRaw.set(p.x/innerWidth,1-p.y/innerHeight);hoverRaw=1;});
+addEventListener('pointerleave',()=>hoverRaw=0);
+
+/* per-section mouse integration: track / momentum / spring / axes */
+function updateSectionMouse(rt){
+  const it=ensureInteractivity(rt.cfg);
+  const track=(it.track??0)/100;        // 0..1
+  const momentum=(it.momentum??0)/100;  // 0..1
+  const spring=(it.spring??0)/100;      // 0..1
+  // target the section mouse follows = raw cursor, masked by axes
+  let tx=mouseRaw.x, ty=mouseRaw.y;
+  if(it.axes==='x') ty=0.5;
+  if(it.axes==='y') tx=0.5;
+  // spring-damper toward target. higher spring = snappier; momentum = less damping (more carry)
+  const k = 0.04 + spring*0.30;             // stiffness
+  const damp = 0.85 - momentum*0.20;        // damping (momentum reduces damping => overshoot)
+  rt.vel.x = (rt.vel.x + (tx-rt.mouse.x)*k)*damp;
+  rt.vel.y = (rt.vel.y + (ty-rt.mouse.y)*k)*damp;
+  rt.mouse.x += rt.vel.x;
+  rt.mouse.y += rt.vel.y;
+  // hover (effect strength) scales by track amount
+  rt.hover += ((hoverRaw*track)-rt.hover)*0.1;
+}
+
+/* ---- draggable text handles (DOM overlay over the GL canvas) ----
+   Text lives inside the GL texture, so it can't be dragged directly.
+   We float a DOM handle over each visible text layer; dragging it writes
+   layer.x/layer.y (percentages) back into the config live. Pointer-down on a
+   handle ALSO selects that layer in the tree + inspector (A1). */
+const handlesEl=document.getElementById('handles');
+let handleSectionIdx=-1;            // which section's handles are shown
+let draggingHandle=null;
+let maskDrag=false;                 // true while the mask gizmo is being dragged/resized
+function buildHandles(activeIdx){
+  handleSectionIdx=activeIdx;
+  handlesEl.innerHTML='';
+  if(activeIdx<0||activeIdx>=CONFIG.sections.length) return;
+  const s=CONFIG.sections[activeIdx];
+  s.layers.forEach((layer,li)=>{
+    if(layer.type!=='text'||!layer.content||layer.hidden) return;
+    const h=document.createElement('div');h.className='thandle';h.textContent=layer.content.slice(0,22);
+    h.style.left=layer.x+'%'; h.style.top=layer.y+'%';
+    h.addEventListener('pointerdown',e=>{
+      e.preventDefault();
+      // capture FIRST, select AFTER — select() rebuilds panels, and rebuilding
+      // handles mid-gesture would detach this node before capture (the
+      // InvalidStateError). refreshHandles() defers while draggingHandle is set.
+      draggingHandle={layer,el:h};h.classList.add('drag');
+      try{h.setPointerCapture(e.pointerId);}catch(_){}
+      if(selected.si!==activeIdx||selected.li!==li) select(activeIdx,li);   // canvas click → selection
+    });
+    h.addEventListener('pointermove',e=>{
+      if(!draggingHandle||draggingHandle.layer!==layer)return;
+      const p=vpPoint(e);
+      const nx=Math.max(0,Math.min(100,(p.x/innerWidth)*100));
+      const ny=Math.max(0,Math.min(100,(p.y/innerHeight)*100));
+      layer.x=Math.round(nx);layer.y=Math.round(ny);
+      h.style.left=layer.x+'%';h.style.top=layer.y+'%';
+      syncDockText(activeIdx,li,layer);
+    });
+    h.addEventListener('pointerup',e=>{
+      if(draggingHandle){draggingHandle.el.classList.remove('drag');draggingHandle=null;}
+      if(handlesDirty){handlesDirty=false;refreshHandles();}
+    });
+    handlesEl.appendChild(h);
+  });
+  /* mask gizmo (B1): shown for the SELECTED effect layer when its mask is on
+     and it lives in the currently visible section. */
+  if(selected.si===activeIdx && selected.li!==null){
+    const lay=s.layers[selected.li];
+    if(lay && lay.type==='effect' && lay.mask && lay.mask.on && !lay.hidden) buildMaskGizmo(lay);
+  }
+}
+function buildMaskGizmo(layer){
+  const mk=layer.mask;
+  const wrap=document.createElement('div');wrap.className='mgizmo';
+  const circ=document.createElement('div');circ.className='mcirc';circ.title='drag to move mask';
+  const dot=document.createElement('div');dot.className='mdot';dot.title='drag to move mask';
+  const grip=document.createElement('div');grip.className='mgrip';grip.title='drag to resize';
+  wrap.appendChild(circ);wrap.appendChild(dot);wrap.appendChild(grip);
+  function place(){
+    const cx=(mk.x??50)/100*innerWidth, cy=(mk.y??50)/100*innerHeight;
+    const rpx=(mk.radius??30)/100*innerHeight;   // radius in height units = shader space
+    circ.style.left=cx+'px';circ.style.top=cy+'px';
+    circ.style.width=circ.style.height=(rpx*2)+'px';
+    dot.style.left=cx+'px';dot.style.top=cy+'px';
+    grip.style.left=(cx+rpx)+'px';grip.style.top=cy+'px';
+  }
+  place();
+  /* move: works from the center dot AND the whole circle body. Grab-offset is
+     preserved so the circle doesn't jump its center to the pointer. */
+  function startMove(el){
+    el.addEventListener('pointerdown',e=>{
+      e.preventDefault();maskDrag=true;
+      const p0=vpPoint(e);
+      const cx=(mk.x??50)/100*innerWidth, cy=(mk.y??50)/100*innerHeight;
+      const offX=p0.x-cx, offY=p0.y-cy;
+      try{el.setPointerCapture(e.pointerId);}catch(_){}
+      const mv=ev=>{
+        const p=vpPoint(ev);
+        mk.x=Math.round(Math.max(0,Math.min(100,(p.x-offX)/innerWidth*100)));
+        mk.y=Math.round(Math.max(0,Math.min(100,(p.y-offY)/innerHeight*100)));
+        place();syncMaskRows(mk);
+      };
+      const up=()=>{maskDrag=false;el.removeEventListener('pointermove',mv);el.removeEventListener('pointerup',up);
+        if(handlesDirty){handlesDirty=false;refreshHandles();}};
+      el.addEventListener('pointermove',mv);el.addEventListener('pointerup',up);
+    });
+  }
+  startMove(dot);startMove(circ);
+  grip.addEventListener('pointerdown',e=>{
+    e.preventDefault();maskDrag=true;
+    try{grip.setPointerCapture(e.pointerId);}catch(_){}
+    const mv=ev=>{
+      const p=vpPoint(ev);
+      const cx=(mk.x??50)/100*innerWidth, cy=(mk.y??50)/100*innerHeight;
+      const dpx=Math.hypot(p.x-cx,p.y-cy);
+      mk.radius=Math.round(Math.max(1,Math.min(150,dpx/innerHeight*100)));
+      place();syncMaskRows(mk);
+    };
+    const up=()=>{maskDrag=false;grip.removeEventListener('pointermove',mv);grip.removeEventListener('pointerup',up);
+      if(handlesDirty){handlesDirty=false;refreshHandles();}};
+    grip.addEventListener('pointermove',mv);grip.addEventListener('pointerup',up);
+  });
+  handlesEl.appendChild(wrap);
+}
+/* if the inspector is showing this effect's mask, update its slider readouts live */
+function syncMaskRows(mk){
+  [['x',mk.x],['y',mk.y],['radius',mk.radius]].forEach(([k,val])=>{
+    const r=document.querySelector(`[data-mrow="${k}"]`);if(!r)return;
+    const b=r.querySelector('b');if(b)b.textContent=(+val).toFixed(0);
+    const inp=r.querySelector('input');if(inp)inp.value=val;
+  });
+}
+/* if the inspector is showing this text layer, update its x/y slider readouts live */
+function syncDockText(si,li,layer){
+  const rows=document.querySelectorAll(`[data-tpos="${si}-${li}"]`);
+  rows.forEach(r=>{const ax=r.getAttribute('data-axis');const b=r.querySelector('b');if(b)b.textContent=(ax==='x'?layer.x:layer.y).toFixed(0);const inp=r.querySelector('input');if(inp)inp.value=(ax==='x'?layer.x:layer.y);});
+}
+
+const clock=new THREE.Clock();
+function tick(){
+  requestAnimationFrame(tick);
+  if(smoothing){smooth+=(target-smooth)*0.09;if(Math.abs(target-smooth)<0.1)smooth=target;window.scrollTo(0,smooth);}
+  const t=clock.getElapsedTime();const gt=scrollY/Math.max(maxScroll(),1);
+
+  // integrate per-section mouse every frame (so momentum keeps moving even off-screen)
+  sections.forEach(updateSectionMouse);
+  sections.forEach(rt=>updateTrail(rt,t));
+
+  const active=sections.map((rt,i)=>({rt,i,op:opacityFor(rt.cfg,gt)})).filter(o=>o.op>0.001);
+  if(active.length===0){renderer.setRenderTarget(null);renderer.clear();}
+  else if(active.length===1){const A=active[0];renderSection(A.rt,t,gt);
+    quad.material=copyMat;copyMat.uniforms.uTex.value=A.rt.result.texture;copyMat.uniforms.uOpacity.value=1;renderer.setRenderTarget(null);renderer.render(fxScene,cam);}
+  else{const A=active[0],B=active[1];renderSection(A.rt,t,gt);const aT=A.rt.result.texture;renderSection(B.rt,t,gt);const bT=B.rt.result.texture;
+    let mix=B.op/(A.op+B.op);
+    mix=(EASE[A.rt.cfg.transitionEase]||EASE.linear)(mix);
+    const tu=transitionUniforms(A.rt.cfg);
+    quad.material=blendMat;blendMat.uniforms.uA.value=aT;blendMat.uniforms.uB.value=bT;blendMat.uniforms.uMix.value=mix;
+    blendMat.uniforms.uMode.value=tu.mode;
+    blendMat.uniforms.uT1.value=tu.vals[0];blendMat.uniforms.uT2.value=tu.vals[1];blendMat.uniforms.uT3.value=tu.vals[2];blendMat.uniforms.uT4.value=tu.vals[3];
+    blendMat.uniforms.uRes.value.set(innerWidth,innerHeight);
+    renderer.setRenderTarget(null);renderer.render(fxScene,cam);}
+
+  ph.style.left=(gt*100)+'%';document.getElementById('sp').textContent=String(Math.round(gt*100)).padStart(2,'0')+'%';
+
+  // keep text drag-handles on the dominant active section
+  const dom = active.length? active.reduce((a,b)=>b.op>a.op?b:a) : null;
+  const domIdx = dom? dom.i : -1;
+  if(domIdx!==handleSectionIdx && !draggingHandle && !maskDrag) buildHandles(domIdx);
+}
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);[rtA,rtB,...sections.map(s=>s.result)].forEach(rt=>rt.setSize(innerWidth,innerHeight));refreshHandles();});
+
+renderDOM();buildUI();buildHUD();tick();
+</script>
+</body>
+</html>
