@@ -95,6 +95,16 @@
 
   .dock-h{font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--amber);padding:16px 16px 8px}
   .sub{font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin:12px 0 6px}
+  .colorrow{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .colorrow .swatch{position:relative;width:24px;height:24px;border-radius:5px;border:1px solid rgba(255,255,255,.14);cursor:pointer;flex:0 0 auto;overflow:hidden}
+  .colorrow .swatch input[type=color]{position:absolute;inset:-4px;width:calc(100% + 8px);height:calc(100% + 8px);border:none;padding:0;cursor:pointer;opacity:0}
+  .colorrow .clabel{flex:1;font-size:11px;color:var(--mute);text-transform:capitalize}
+  .colorrow .hexin{width:78px;background:#0d0f13;border:1px solid rgba(255,255,255,.12);border-radius:4px;color:#cfd2d6;font-family:ui-monospace,monospace;font-size:11px;padding:4px 6px;text-align:right}
+  .colorrow .hexin:focus{outline:none;border-color:var(--accent)}
+  .colorrow .cremove{flex:0 0 auto;background:none;border:none;color:var(--mute);cursor:pointer;font-size:11px;padding:2px 4px;line-height:1}
+  .colorrow .cremove:hover{color:#ff6a6a}
+  button.addcolor{width:100%;background:none;border:1px dashed rgba(255,255,255,.16);border-radius:5px;color:var(--mute);font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:7px;margin-top:5px;cursor:pointer}
+  button.addcolor:hover{border-color:var(--accent);color:var(--accent)}
   label.f{display:flex;justify-content:space-between;font-size:12px;color:#aeb2ba;margin:7px 0 3px}
   label.f b{color:var(--ink);font-family:ui-monospace,monospace}
   input[type=range]{width:100%;accent-color:var(--amber);height:3px}
@@ -402,6 +412,180 @@ const FX = {
       }`},
 };
 const FX_NAMES=Object.keys(FX);
+
+/* ============================================================================
+   ███ GENERATORS ███ — content layers that PRODUCE pixels from nothing
+   (no uTex input), rendered GL-native straight into the spine stack as a base
+   layer. Effects above them distort them; masks confine them; per-layer
+   interactivity feeds uMouse/uHover just like effects. Schema:
+     { type:'generator', gen:'lineWaves', params:{…}, mask:{…}, interactivity:{…} }
+   Same [name,min,max,default] param shape as effects. The generator main()
+   IGNORES uTex — it writes colour from coordinates + time. mask blends the
+   generator against transparent (so a masked generator is a confined shape).
+   ============================================================================ */
+const GEN = {
+  lineWaves:{ params:[['speed',0,2,0.3],['innerLines',4,80,32],['outerLines',4,80,36],['warp',0,3,1],['rotation',-180,180,-45],['edgeFade',0,0.5,0],['brightness',0.2,2,1]],
+    colors:[['tint','#ffffff']],
+    glsl:`uniform float uSpeed,uInnerLines,uOuterLines,uWarp,uRotation,uEdgeFade,uBrightness;${NOISE_GLSL}
+      vec4 gen(vec2 uv){
+        float ar=uRes.x/max(uRes.y,1.0);
+        vec2 p=(uv-0.5); p.x*=ar;
+        float a=uRotation*3.14159/180.0;
+        float ca=cos(a),sa=sin(a);
+        p=vec2(p.x*ca-p.y*sa, p.x*sa+p.y*ca);
+        float t=uTime*uSpeed;
+        float w=(sn(p*1.5+vec2(t,0.0))-0.5)*uWarp;
+        float coord=p.y+w;
+        float center=1.0-abs(p.y)*2.0;
+        float lines=mix(uOuterLines,uInnerLines,clamp(center,0.0,1.0));
+        float mp=(uMouse.y-uv.y)*uHover*0.3;
+        float bands=sin((coord+mp)*lines*3.14159 + t*2.0);
+        float line=smoothstep(0.2,1.0,abs(bands));
+        float intensity=clamp(line*uBrightness,0.0,1.0);
+        if(uEdgeFade>0.0001){
+          float ef=smoothstep(0.0,uEdgeFade,uv.x)*smoothstep(0.0,uEdgeFade,1.0-uv.x)
+                  *smoothstep(0.0,uEdgeFade,uv.y)*smoothstep(0.0,uEdgeFade,1.0-uv.y);
+          intensity*=ef;
+        }
+        vec3 col=uTint*intensity;     // tint the ridges (white tint = original look)
+        return vec4(col, 1.0);
+      }`},
+
+  /* LIQUID CHROME — domain-warped value-noise field read as brushed metal.
+     speed/amplitude scale the warp; freqX/freqY set the directional grain.
+     A single tint colourises the metal (white = neutral chrome). */
+  liquidChrome:{ params:[['speed',0,1,0.2],['amplitude',0,1,0.3],['freqX',0.5,8,3],['freqY',0.5,8,3],['contrast',0.4,2.5,1.3]],
+    colors:[['tint','#ffffff']],
+    glsl:`uniform float uSpeed,uAmplitude,uFreqX,uFreqY,uContrast;${NOISE_GLSL}
+      // small fbm from the shared value noise
+      float fbm(vec2 p){float s=0.0,a=0.5;for(int i=0;i<5;i++){s+=a*sn(p);p*=2.0;a*=0.5;}return s;}
+      vec4 gen(vec2 uv){
+        float ar=uRes.x/max(uRes.y,1.0);
+        vec2 p=(uv-0.5); p.x*=ar;
+        float t=uTime*uSpeed;
+        // mouse nudges the field origin
+        p += (uMouse-0.5)*uHover*0.3;
+        // domain warp: offset the sample coords by another fbm field
+        vec2 q=vec2(fbm(p*vec2(uFreqX,uFreqY)+vec2(0.0,t)),
+                    fbm(p*vec2(uFreqX,uFreqY)+vec2(5.2,1.3-t)));
+        vec2 r=p + uAmplitude*2.0*(q-0.5);
+        float v=fbm(r*vec2(uFreqX,uFreqY)+t*0.5);
+        // shape into metallic banding with contrast + a soft specular ridge
+        v=pow(clamp(v,0.0,1.0),uContrast);
+        float spec=smoothstep(0.45,0.55,fract(v*3.0));
+        float lum=clamp(v*0.85+spec*0.25,0.0,1.0);
+        return vec4(uTint*lum, 1.0);
+      }`},
+
+  /* COLOR BENDS — flowing colour bands along a rotated axis, warped by noise,
+     coloured by a palette list (the bands sweep through the colours). */
+  colorBends:{ params:[['rotation',-180,180,90],['speed',0,1,0.2],['warp',0,2,0.7],['softness',0.05,1,0.4]],
+    colorList:{name:'palette', default:['#5227ff','#ff9ffc','#7cff67'], max:6},
+    glsl:`uniform float uRotation,uSpeed,uWarp,uSoftness;${NOISE_GLSL}
+      float fbm(vec2 p){float s=0.0,a=0.5;for(int i=0;i<4;i++){s+=a*sn(p);p*=2.0;a*=0.5;}return s;}
+      vec3 paletteAt(float x){
+        // x in [0,1] -> piecewise blend across uPalette[0..count-1]
+        int n=uPaletteCount; if(n<1) return vec3(0.0);
+        float fx=clamp(x,0.0,1.0)*float(n-1);
+        int idx=int(floor(fx)); float f=fract(fx);
+        vec3 a=uPalette[0], b=uPalette[0];
+        for(int i=0;i<8;i++){ if(i==idx)a=uPalette[i]; if(i==idx+1)b=uPalette[i]; if(i>=n)break; }
+        return mix(a,b,smoothstep(0.0,1.0,f));
+      }
+      vec4 gen(vec2 uv){
+        float ar=uRes.x/max(uRes.y,1.0);
+        vec2 p=(uv-0.5); p.x*=ar;
+        float a=uRotation*3.14159/180.0;
+        float ca=cos(a),sa=sin(a);
+        p=vec2(p.x*ca-p.y*sa, p.x*sa+p.y*ca);
+        float t=uTime*uSpeed;
+        p += (uMouse-0.5)*uHover*0.25;
+        // warp the band coordinate with flowing noise -> liquid bends
+        float w=(fbm(p*1.4+vec2(t,t*0.6))-0.5)*uWarp;
+        float coord=p.y*0.6+w+t*0.15;
+        // softness widens the colour transitions; a low-freq term keeps it organic
+        float band=fract(coord*0.5+0.5);
+        // ease the palette position so transitions feel like gradients
+        float eased=mix(band, smoothstep(0.0,1.0,band), uSoftness);
+        vec3 col=paletteAt(eased);
+        return vec4(col, 1.0);
+      }`},
+
+  /* AURORA — vertical curtains of light. Colour stops blend horizontally across
+     the frame; a flowing noise field lifts the curtains into shimmering bands
+     that rise from the bottom. amplitude = curtain height/intensity, blend =
+     how softly the colour stops melt into each other. */
+  aurora:{ params:[['speed',0,1,0.3],['amplitude',0.2,2,1],['blend',0,1,0.5],['scale',0.5,4,1.5]],
+    colorList:{name:'stops', default:['#5227ff','#7cff67','#5227ff'], max:6},
+    glsl:`uniform float uSpeed,uAmplitude,uBlend,uScale;${NOISE_GLSL}
+      float fbm(vec2 p){float s=0.0,a=0.5;for(int i=0;i<4;i++){s+=a*sn(p);p*=2.0;a*=0.5;}return s;}
+      vec3 stopAt(float x){
+        int n=uStopsCount; if(n<1) return vec3(0.0);
+        float fx=clamp(x,0.0,1.0)*float(n-1);
+        int idx=int(floor(fx)); float f=fract(fx);
+        vec3 a=uStops[0], b=uStops[0];
+        for(int i=0;i<8;i++){ if(i==idx)a=uStops[i]; if(i==idx+1)b=uStops[i]; if(i>=n)break; }
+        // uBlend widens the melt between stops
+        float ff=mix(step(0.5,f), smoothstep(0.0,1.0,f), uBlend);
+        return mix(a,b,ff);
+      }
+      vec4 gen(vec2 uv){
+        float ar=uRes.x/max(uRes.y,1.0);
+        float t=uTime*uSpeed;
+        // horizontal colour position (which curtain hue), nudged by the mouse
+        float cx=uv.x + (uMouse.x-0.5)*uHover*0.3;
+        vec3 col=stopAt(fract(cx));
+        // each column has a noisy "height" the curtain reaches up to
+        float height=0.35+0.45*fbm(vec2(uv.x*uScale*3.0 + t, t*0.4))*uAmplitude;
+        // glow is strongest near that height edge, fading above and below
+        float d=uv.y-height;
+        float curtain=smoothstep(0.5,0.0,abs(d)*2.2);   // soft band around the edge
+        // vertical streaks within the curtain for the classic aurora texture
+        float streak=0.6+0.4*fbm(vec2(uv.x*uScale*8.0, uv.y*3.0 - t*1.5));
+        float glow=curtain*streak;
+        // a base shimmer below the edge so curtains read as light from the ground up
+        glow+=smoothstep(height+0.05,0.0,uv.y)*0.25*streak*uAmplitude;
+        glow=clamp(glow,0.0,1.0);
+        return vec4(col*glow*1.7, 1.0);
+      }`},
+
+  /* GHOST CURSOR — the only generator that reads the TRAIL BUFFER as its
+     content. The cursor's wake (trailAt) becomes a luminous cloud: bloomed by
+     multi-tap sampling, lifted by brightness, textured with film grain, and
+     tinted. REQUIRES a trail to feed it — if the layer's trail is Off/none the
+     buffer is empty and nothing shows, so the inspector nudges you to set one.
+     bloomStrength/bloomRadius spread the glow; grain adds the filmic noise;
+     brightness scales the whole cloud. */
+  ghostCursor:{ params:[['bloomStrength',0,2,1],['bloomRadius',0.2,3,1],['grain',0,0.4,0.05],['brightness',0.5,4,2],['softness',0.2,2,1]],
+    colors:[['tint','#8a7bff']],
+    glsl:`uniform float uBloomStrength,uBloomRadius,uGrain,uBrightness,uSoftness;${NOISE_GLSL}
+      vec4 gen(vec2 uv){
+        // read the trail at the RAW fragment position (vUv), not the warped uv,
+        // so the ghost cloud isn't distorted by its own trail-warp.
+        float core=trailAt(vUv);
+        // multi-tap bloom: sample the wake in a ring and accumulate, scaled by radius
+        float bloom=0.0;
+        float r=uBloomRadius*0.02;
+        for(int i=0;i<8;i++){
+          float a=float(i)/8.0*6.2831853;
+          vec2 off=vec2(cos(a),sin(a))*r;
+          bloom+=trailAt(vUv+off);
+          bloom+=trailAt(vUv+off*0.5)*0.6;
+        }
+        bloom/=12.8;
+        // soften the core into a cloud (softness widens the falloff)
+        float cloud=pow(clamp(core,0.0,1.0),1.0/max(uSoftness,0.1));
+        float lum=cloud + bloom*uBloomStrength;
+        lum*=uBrightness;
+        // film grain — animated noise, scaled by intensity so it lives in the cloud
+        float g=(sn(vUv*uRes.xy*0.5 + uTime*40.0)-0.5)*uGrain;
+        lum+=g*smoothstep(0.0,0.3,lum);
+        lum=clamp(lum,0.0,1.0);
+        // tinted cloud; alpha = luminance so it composites as a glow over layers below
+        return vec4(uTint*lum, lum);
+      }`},
+};
+const GEN_NAMES=Object.keys(GEN);
 const HEADER=`precision highp float;varying vec2 vUv;uniform sampler2D uTex,uTrail;uniform float uTime,uProg,uHover,uOpacity,uTrailStyle,uTrailStrength,uMaskOn,uMaskRadius,uMaskFeather,uMaskInvert;uniform vec2 uMouse,uRes,uMaskPos;
 // sample trail intensity (0..1) at a uv; red channel holds the accumulated wake
 float trailAt(vec2 uv){return texture2D(uTrail,uv).r;}
@@ -449,7 +633,19 @@ float maskAt(vec2 uv){
   }
   return m;
 }`;
-function effectFrag(fxName){return `${HEADER}${FX[fxName].glsl}void main(){vec4 base=texture2D(uTex,vUv);vec2 uv=trailWarp(vUv);vec4 c=fx(uv);float mm=maskAt(vUv);vec4 o=mix(base,c,mm);o.a*=uOpacity;gl_FragColor=o;}`;}
+function effectFrag(fxName){return `${HEADER}${BLEND_GLSL}uniform int uBlendMode;${colorDecls(FX[fxName])}${FX[fxName].glsl}void main(){vec4 base=texture2D(uTex,vUv);vec2 uv=trailWarp(vUv);vec4 c=fx(uv);float mm=maskAt(vUv);vec3 blended=blendPair(base.rgb,c.rgb,uBlendMode);vec3 outc=mix(base.rgb,blended,mm*uOpacity);vec4 o=vec4(outc,base.a);gl_FragColor=o;}`;}
+
+/* generator main: writes gen(uv) colour, confined by the mask (masked area =
+   transparent, so a masked generator is a shape). IGNORES uTex. */
+function generatorFrag(genName){return `${HEADER}${colorDecls(GEN[genName])}${GEN[genName].glsl}void main(){vec2 uv=trailWarp(vUv);vec4 c=gen(uv);float mm=maskAt(vUv);c.a*=mm*uOpacity;gl_FragColor=c;}`;}
+function ensureGenMat(layer){
+  if(layer._mat && layer._gen===layer.gen) return layer._mat;
+  const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(innerWidth,innerHeight)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0},uBlendMode:{value:0}};
+  GEN[layer.gen].params.forEach(([p])=>u['u'+p[0].toUpperCase()+p.slice(1)]={value:0});
+  addColorUniforms(u,GEN[layer.gen]);
+  layer._mat=new THREE.ShaderMaterial({uniforms:u,vertexShader:VS,fragmentShader:generatorFrag(layer.gen),transparent:true,depthWrite:false});
+  layer._gen=layer.gen; return layer._mat;
+}
 
 /* ---- renderer + ping-pong ---- */
 const canvas=document.getElementById('stage');
@@ -469,6 +665,7 @@ function makeSectionRuntime(s,i){
     canvas:document.createElement('canvas'), images:{}, videos:{}, mats:{},
     // per-section mouse state (for momentum/spring)
     mouse:new THREE.Vector2(.5,.5), vel:new THREE.Vector2(0,0), hover:0,
+    fxState:new Map(),   // layer -> {mouse,vel,hover} for effects with custom interactivity
     trailA:mkRT(), trailB:mkRT(), trailInit:false };
   rt.canvas.width=1280; rt.canvas.height=800;
   rt.tex.minFilter=THREE.LinearFilter;
@@ -571,8 +768,9 @@ function drawContent(ctx, layer, rt){
 
 function ensureFxMat(layer){
   if(layer._mat && layer._fx===layer.fx) return layer._mat;
-  const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(innerWidth,innerHeight)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0}};
+  const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(innerWidth,innerHeight)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0},uBlendMode:{value:0}};
   FX[layer.fx].params.forEach(([p])=>u['u'+p[0].toUpperCase()+p.slice(1)]={value:0});
+  addColorUniforms(u,FX[layer.fx]);
   layer._mat=new THREE.ShaderMaterial({uniforms:u,vertexShader:VS,fragmentShader:effectFrag(layer.fx),transparent:true,depthWrite:false});
   layer._fx=layer.fx; return layer._mat;
 }
@@ -580,10 +778,90 @@ function ensureFxMat(layer){
 const ctxCanvas=document.createElement('canvas');ctxCanvas.width=1280;ctxCanvas.height=800;
 const ctx2d=ctxCanvas.getContext('2d');
 const overTex=new THREE.CanvasTexture(ctxCanvas);overTex.minFilter=THREE.LinearFilter;
+
+/* ============================================================================
+   BLEND MODES — how a layer composites onto the stack below it. 'normal' =
+   alpha-over (unchanged). Each mode is a one-line formula on base.rgb (b) and
+   over.rgb (o). The seam Unicorn can't touch: a generator on 'screen' over a
+   photo, an effect on 'multiply'.
+   ============================================================================ */
+const BLEND_MODES=['normal','screen','multiply','add','overlay','darken','lighten','colordodge','difference','exclusion','softlight'];
+const BLEND_ID={}; BLEND_MODES.forEach((n,i)=>BLEND_ID[n]=i);
+
+/* ============================================================================
+   COLOR PARAMS — effects/generators may declare colours alongside numeric
+   params, kept in SEPARATE registry keys so every numeric read-site is
+   untouched (color is purely additive):
+     colors:[['tint','#FF6A1A']]          single colour  -> uniform vec3 uTint
+     colorList:{name:'palette',default:['#5227ff','#ff9ffc','#7cff67'],max:6}
+                                          add/remove list -> vec3 uPalette[MAX]
+                                                           + int  uPaletteCount
+   Stored on the layer as layer.colors={tint:'#..'} and
+   layer.colorLists={palette:['#..',..]}. Hex -> normalised vec3 for GLSL.
+   ============================================================================ */
+const MAX_COLORS=8;
+function hexToVec3(hex){
+  const h=(hex||'#000000').replace('#','');
+  const r=parseInt(h.substring(0,2),16)/255;
+  const g=parseInt(h.substring(2,4),16)/255;
+  const b=parseInt(h.substring(4,6),16)/255;
+  return new THREE.Vector3(isNaN(r)?0:r,isNaN(g)?0:g,isNaN(b)?0:b);
+}
+const capit=p=>'u'+p[0].toUpperCase()+p.slice(1);
+/* add colour uniforms to a material uniform set, given an effect/gen def */
+function addColorUniforms(u,def){
+  (def.colors||[]).forEach(([name])=>{u[capit(name)]={value:new THREE.Vector3(1,1,1)};});
+  if(def.colorList){
+    const arr=[];for(let i=0;i<MAX_COLORS;i++)arr.push(new THREE.Vector3(0,0,0));
+    u[capit(def.colorList.name)]={value:arr};
+    u[capit(def.colorList.name)+'Count']={value:0};
+  }
+}
+/* push current layer colour values into a material's uniforms */
+function setColorUniforms(mat,layer,def){
+  (def.colors||[]).forEach(([name,defHex])=>{
+    const k=capit(name);if(mat.uniforms[k]){const hex=(layer.colors&&layer.colors[name])||defHex;mat.uniforms[k].value.copy(hexToVec3(hex));}
+  });
+  if(def.colorList){
+    const k=capit(def.colorList.name);
+    const list=(layer.colorLists&&layer.colorLists[def.colorList.name])||def.colorList.default;
+    if(mat.uniforms[k]){
+      for(let i=0;i<MAX_COLORS;i++){mat.uniforms[k].value[i].copy(hexToVec3(list[i]||'#000000'));}
+      mat.uniforms[k+'Count'].value=Math.min(list.length,MAX_COLORS);
+    }
+  }
+}
+/* GLSL declaration block for an effect/gen's colours (prepended to its shader) */
+function colorDecls(def){
+  let s='';
+  (def.colors||[]).forEach(([name])=>{s+=`uniform vec3 ${capit(name)};`;});
+  if(def.colorList){s+=`uniform vec3 ${capit(def.colorList.name)}[${MAX_COLORS}];uniform int ${capit(def.colorList.name)}Count;`;}
+  return s;
+}
+const BLEND_GLSL=`
+vec3 blendPair(vec3 b, vec3 o, int mode){
+  if(mode==1) return 1.0-(1.0-b)*(1.0-o);
+  if(mode==2) return b*o;
+  if(mode==3) return min(b+o,1.0);
+  if(mode==4){ vec3 lo=2.0*b*o; vec3 hi=1.0-2.0*(1.0-b)*(1.0-o); return mix(lo,hi,step(0.5,b)); }
+  if(mode==5) return min(b,o);
+  if(mode==6) return max(b,o);
+  if(mode==7) return min(b/max(1.0-o,0.001),1.0);
+  if(mode==8) return abs(b-o);
+  if(mode==9) return b+o-2.0*b*o;
+  if(mode==10){ return mix(2.0*b*o+b*b*(1.0-2.0*o), sqrt(b)*(2.0*o-1.0)+2.0*b*(1.0-o), step(0.5,o)); }
+  return o;
+}
+vec4 blendComposite(vec4 base, vec4 over, int mode, float op){
+  vec3 blended=blendPair(base.rgb, over.rgb, mode);
+  float a=over.a*op;
+  return vec4(mix(base.rgb, blended, a), max(base.a, a));
+}`;
+
 const overMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,
-  uniforms:{uBase:{value:null},uOver:{value:null}},vertexShader:VS,
-  fragmentShader:`precision highp float;varying vec2 vUv;uniform sampler2D uBase,uOver;
-    void main(){vec4 b=texture2D(uBase,vUv);vec4 o=texture2D(uOver,vUv);gl_FragColor=mix(b,o,o.a);}`});
+  uniforms:{uBase:{value:null},uOver:{value:null},uBlendMode:{value:0},uOpacity:{value:1}},vertexShader:VS,
+  fragmentShader:`precision highp float;varying vec2 vUv;uniform sampler2D uBase,uOver;uniform int uBlendMode;uniform float uOpacity;${BLEND_GLSL}
+    void main(){vec4 b=texture2D(uBase,vUv);vec4 o=texture2D(uOver,vUv);gl_FragColor=blendComposite(b,o,uBlendMode,uOpacity);}`});
 
 /* TRAIL feedback material: reads the previous trail, decays it, stamps a soft
    dot at the cursor. Output red channel = accumulated wake intensity (0..1). */
@@ -610,23 +888,87 @@ function updateTrail(rt,t){
   }
   const decay=Math.min(0.995, (tr.decay??90)/100*0.5+0.5);   // 90 -> ~0.95
   const radius=((tr.radius??12)/100)*0.5;                     // 12 -> 0.06
+  const cur=trailCursor(rt,'_trailSpring',tr);               // trail's OWN smoothed cursor
   quad.material=trailMat;
   trailMat.uniforms.uPrev.value=rt.trailA.texture;
-  trailMat.uniforms.uMouse.value.copy(rt.mouse);
+  trailMat.uniforms.uMouse.value.copy(cur);
   trailMat.uniforms.uDecay.value=decay;
   trailMat.uniforms.uRadius.value=radius;
-  trailMat.uniforms.uAdd.value=1.0;
+  trailMat.uniforms.uAdd.value=(tr.opacity??100)/100;        // trail wake opacity
   trailMat.uniforms.uAspect.value=innerWidth/innerHeight;
   renderer.setRenderTarget(rt.trailB); renderer.render(fxScene,cam);
   [rt.trailA,rt.trailB]=[rt.trailB,rt.trailA];   // ping-pong; trailA is now newest
 }
+/* the trail's OWN spring-damper cursor — independent of section/layer
+   interactivity. Springs from mouseRaw so spring/momentum/easing here control
+   bounce directly. State is stashed on the owner under `key`. */
+function trailCursor(owner,key,tr){
+  let st=owner[key];
+  if(!st){ st={mouse:new THREE.Vector2(mouseRaw.x,mouseRaw.y),vel:new THREE.Vector2(0,0),hover:0}; owner[key]=st; }
+  // reuse stepSpring with the trail's spring params; track=100 so it follows fully
+  stepSpring(st, {track:100, momentum:tr.momentum??20, spring:tr.spring??40, axes:'both', easing:tr.easing||'linear'}, mouseRaw, 1);
+  return st.mouse;
+}
 const TRAIL_STYLE_ID={none:0,smoke:1,blur:2,ripple:3,displace:4};
+
+/* ============================================================================
+   PER-LAYER TRAIL — a layer's trail mode can be:
+     'section' (default/absent) — share the section's trail buffer (zero cost)
+     'custom'  — its OWN trail buffer pair (lazily allocated) + own style/
+                 strength/decay/radius, fed by the section mouse
+     'off'     — no trail wake at all
+   Custom trail = 2 extra render targets per layer + 1 decay+stamp pass/frame.
+   Buffers are created only when a layer asks, and disposed when it stops.
+   ============================================================================ */
+function updateLayerTrail(rt,layer,t){
+  const lt=layer.trail;
+  // only 'custom' needs its own buffers; section/off don't
+  if(!lt || lt.mode!=='custom' || !lt.style || lt.style==='none'){
+    if(layer._trailA){ layer._trailA.dispose(); layer._trailB.dispose(); layer._trailA=layer._trailB=null; layer._trailInit=false; }
+    return;
+  }
+  if(!layer._trailA){ layer._trailA=mkRT(); layer._trailB=mkRT(); layer._trailInit=false; }
+  if(!layer._trailInit){
+    quad.material=trailMat; trailMat.uniforms.uPrev.value=layer._trailB.texture; trailMat.uniforms.uAdd.value=0; trailMat.uniforms.uDecay.value=0;
+    renderer.setRenderTarget(layer._trailA); renderer.render(fxScene,cam);
+    renderer.setRenderTarget(layer._trailB); renderer.render(fxScene,cam);
+    layer._trailInit=true;
+  }
+  const decay=Math.min(0.995,(lt.decay??90)/100*0.5+0.5);
+  const radius=((lt.radius??12)/100)*0.5;
+  const cur=trailCursor(layer,'_trailSpring',lt);            // layer trail's OWN smoothed cursor
+  quad.material=trailMat;
+  trailMat.uniforms.uPrev.value=layer._trailA.texture;
+  trailMat.uniforms.uMouse.value.copy(cur);
+  trailMat.uniforms.uDecay.value=decay;
+  trailMat.uniforms.uRadius.value=radius;
+  trailMat.uniforms.uAdd.value=(lt.opacity??100)/100;
+  trailMat.uniforms.uAspect.value=innerWidth/innerHeight;
+  renderer.setRenderTarget(layer._trailB); renderer.render(fxScene,cam);
+  [layer._trailA,layer._trailB]=[layer._trailB,layer._trailA];
+}
+/* resolve which trail buffer + style/strength a layer should read.
+   Returns {tex, styleId, strength} — null tex means "no trail". */
+function resolveTrail(rt,layer){
+  const lt=layer.trail;
+  const mode=(lt&&lt.mode)||'section';
+  if(mode==='off') return {tex:null,styleId:0,strength:0};
+  if(mode==='custom'){
+    const active=lt.style&&lt.style!=='none'&&layer._trailA;
+    return {tex:active?layer._trailA.texture:null, styleId:TRAIL_STYLE_ID[lt.style]||0, strength:((lt.strength??50)/100)*0.6};
+  }
+  // section
+  const str=(rt.cfg.interactivity&&rt.cfg.interactivity.trail)||{style:'none'};
+  const active=str.style&&str.style!=='none';
+  return {tex:active?rt.trailA.texture:null, styleId:TRAIL_STYLE_ID[str.style]||0, strength:((str.strength??50)/100)*0.6};
+}
 
 function renderSection(rt,t,gt){
   const layers=rt.cfg.layers;
   const prog=progIn(rt.cfg.win,gt);
   let glTex=null;
   let pingIn=rtA, pingOut=rtB;
+  if(!rt._genRT) rt._genRT=mkRT();   // dedicated generator scratch (avoids ping-pong collision)
   function contentTexture(drawList){
     ctx2d.clearRect(0,0,1280,800);
     drawList.forEach(l=>drawContent(ctx2d,l,rt));
@@ -643,6 +985,7 @@ function renderSection(rt,t,gt){
       glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;
     } else {
       quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=cTex;
+      overMat.uniforms.uBlendMode.value=0;overMat.uniforms.uOpacity.value=1;
       renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
       glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
     }
@@ -657,14 +1000,15 @@ function renderSection(rt,t,gt){
       }
       const mat=ensureFxMat(layer);quad.material=mat;
       mat.uniforms.uTex.value=glTex;mat.uniforms.uTime.value=t;mat.uniforms.uProg.value=prog;
-      // per-section interactivity feeds the effect's mouse uniforms
-      mat.uniforms.uHover.value=rt.hover;mat.uniforms.uMouse.value.copy(rt.mouse);mat.uniforms.uOpacity.value=1;
+      // per-LAYER interactivity (falls back to section, or neutral when off)
+      const em=effectMouse(rt,layer);
+      mat.uniforms.uHover.value=em.hover;mat.uniforms.uMouse.value.copy(em.mouse);mat.uniforms.uOpacity.value=(layer.opacity??1);
       if(mat.uniforms.uRes)mat.uniforms.uRes.value.set(innerWidth,innerHeight);
-      // trail
-      const tr=(rt.cfg.interactivity&&rt.cfg.interactivity.trail)||{style:'none'};
-      if(mat.uniforms.uTrail){mat.uniforms.uTrail.value=(tr.style&&tr.style!=='none')?rt.trailA.texture:null;}
-      if(mat.uniforms.uTrailStyle)mat.uniforms.uTrailStyle.value=TRAIL_STYLE_ID[tr.style]||0;
-      if(mat.uniforms.uTrailStrength)mat.uniforms.uTrailStrength.value=((tr.strength??50)/100)*0.6;
+      // trail (per-layer aware: section / custom / off)
+      const etr=resolveTrail(rt,layer);
+      if(mat.uniforms.uTrail)mat.uniforms.uTrail.value=etr.tex;
+      if(mat.uniforms.uTrailStyle)mat.uniforms.uTrailStyle.value=etr.styleId;
+      if(mat.uniforms.uTrailStrength)mat.uniforms.uTrailStrength.value=etr.strength;
       // mask (B1): config x/y are % from top-left (like text layers) -> uv space
       const mk=layer.mask||{};
       if(mat.uniforms.uMaskOn)mat.uniforms.uMaskOn.value=mk.on?1:0;
@@ -675,10 +1019,70 @@ function renderSection(rt,t,gt){
         mat.uniforms.uMaskInvert.value=mk.invert?1:0;
       }
       FX[layer.fx].params.forEach(([p,min,max,def])=>{const k='u'+p[0].toUpperCase()+p.slice(1);if(mat.uniforms[k])mat.uniforms[k].value=layer.params[p]??(def!==undefined?def:(min+max)/2);});
+      setColorUniforms(mat,layer,FX[layer.fx]);
+      if(mat.uniforms.uBlendMode)mat.uniforms.uBlendMode.value=BLEND_ID[layer.blend||'normal']||0;
       renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
       glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
+    } else if(layer.type==='generator'){
+      // GL-native content layer: render gen() colour, composited over whatever
+      // is below. Two passes: (1) draw the generator to a scratch RT, (2) alpha
+      // -composite it over the running stack via overMat (same as 2D content).
+      commitContentOverGL();
+      const mat=ensureGenMat(layer);quad.material=mat;
+      mat.uniforms.uTime.value=t;mat.uniforms.uProg.value=prog;mat.uniforms.uOpacity.value=1;
+      const em=effectMouse(rt,layer);
+      mat.uniforms.uHover.value=em.hover;mat.uniforms.uMouse.value.copy(em.mouse);
+      if(mat.uniforms.uRes)mat.uniforms.uRes.value.set(innerWidth,innerHeight);
+      const gtr=resolveTrail(rt,layer);
+      if(mat.uniforms.uTrail)mat.uniforms.uTrail.value=gtr.tex;
+      if(mat.uniforms.uTrailStyle)mat.uniforms.uTrailStyle.value=gtr.styleId;
+      if(mat.uniforms.uTrailStrength)mat.uniforms.uTrailStrength.value=gtr.strength;
+      const gmk=layer.mask||{};
+      if(mat.uniforms.uMaskOn)mat.uniforms.uMaskOn.value=gmk.on?1:0;
+      if(gmk.on&&mat.uniforms.uMaskPos){
+        mat.uniforms.uMaskPos.value.set((gmk.x??50)/100,1-(gmk.y??50)/100);
+        mat.uniforms.uMaskRadius.value=(gmk.radius??30)/100;
+        mat.uniforms.uMaskFeather.value=(gmk.feather??40)/100;
+        mat.uniforms.uMaskInvert.value=gmk.invert?1:0;
+      }
+      GEN[layer.gen].params.forEach(([p,min,max,def])=>{const k='u'+p[0].toUpperCase()+p.slice(1);if(mat.uniforms[k])mat.uniforms[k].value=layer.params[p]??(def!==undefined?def:(min+max)/2);});
+      setColorUniforms(mat,layer,GEN[layer.gen]);
+      // pass 1: generator -> dedicated scratch RT (never part of ping-pong)
+      renderer.setRenderTarget(rt._genRT);renderer.render(fxScene,cam);
+      const genTex=rt._genRT.texture;
+      // pass 2: composite over the running base (or seed if first content)
+      if(!haveBase){
+        quad.material=copyMat;copyMat.uniforms.uTex.value=genTex;copyMat.uniforms.uOpacity.value=(layer.opacity??1);
+        renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
+        glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;
+      } else {
+        quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=genTex;
+        overMat.uniforms.uBlendMode.value=BLEND_ID[layer.blend||'normal']||0;
+        overMat.uniforms.uOpacity.value=(layer.opacity??1);
+        renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
+        glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
+      }
     } else {
-      pending.push(layer);
+      const hasBlend=layer.blend&&layer.blend!=='normal';
+      const hasOpacity=(layer.opacity??1)<1;
+      if((layer.type==='image'||layer.type==='video'||layer.type==='text') && (hasBlend||hasOpacity)){
+        commitContentOverGL();
+        const cTex=contentTexture([layer]);
+        if(!haveBase){
+          quad.material=copyMat;copyMat.uniforms.uTex.value=cTex;copyMat.uniforms.uOpacity.value=(layer.opacity??1);
+          renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
+          glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;
+        } else {
+          quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=cTex;
+          overMat.uniforms.uBlendMode.value=BLEND_ID[layer.blend||'normal']||0;
+          overMat.uniforms.uOpacity.value=(layer.opacity??1);
+          renderer.setRenderTarget(pingOut);renderer.render(fxScene,cam);
+          glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
+        }
+        cTex.dispose();
+      } else {
+        pending.push(layer);
+      }
     }
   });
   commitContentOverGL();
@@ -867,11 +1271,11 @@ function transitionUniforms(s){
   def.params.forEach((p,i)=>{if(i<4)vals[i]=tp[p[0]]??(p[3]!==undefined?p[3]:(p[1]+p[2])/2);});
   return {mode:def.mode,vals};
 }
-const LAYER_KINDS=['image','video','text','effect'];
-const TYPE_COLOR={image:'var(--img)',video:'var(--vid)',text:'var(--txt)',effect:'var(--fx)'};
+const LAYER_KINDS=['image','video','text','generator','effect'];
+const TYPE_COLOR={image:'var(--img)',video:'var(--vid)',text:'var(--txt)',generator:'#ffd24a',effect:'var(--fx)'};
 let selected={si:0,li:null};
 
-function layerName(l){return l.label||(l.type==='effect'?l.fx:(l.type==='text'?(l.content||'text'):l.type));}
+function layerName(l){return l.label||(l.type==='effect'?l.fx:(l.type==='generator'?l.gen:(l.type==='text'?(l.content||'text'):l.type)));}
 function clampSelection(){
   if(selected.si>=CONFIG.sections.length)selected.si=CONFIG.sections.length-1;
   if(selected.si<0)selected.si=0;
@@ -890,6 +1294,15 @@ function refreshHandles(){
 }
 
 function subHead(t){const d=document.createElement('div');d.className='sub';d.textContent=t;return d;}
+function easeRow(obj){
+  const w=document.createElement('label');w.className='f';w.innerHTML='<span>easing</span>';
+  const sel=document.createElement('select');
+  [['linear','linear'],['out','ease-out (calm)'],['ease','ease-in-out'],['in','ease-in']].forEach(([v,lbl])=>{
+    const o=document.createElement('option');o.value=v;o.textContent=lbl;if((obj.easing||'linear')===v)o.selected=true;sel.appendChild(o);
+  });
+  sel.onchange=()=>{obj.easing=sel.value;};
+  w.appendChild(sel);return w;
+}
 function rangeRow(name,val,min,max,step,onInput){const w=document.createElement('label');w.className='f';const dec=step<1?2:0;
   w.innerHTML=`<span>${name}</span><b>${(+val).toFixed(dec)}</b>`;const r=document.createElement('input');r.type='range';r.min=min;r.max=max;r.step=step;r.value=val;
   r.oninput=()=>{w.querySelector('b').textContent=(+r.value).toFixed(dec);onInput(parseFloat(r.value));};w.appendChild(r);return w;}
@@ -1073,40 +1486,58 @@ function buildInspector(){
     insBody.appendChild(subHead('Layout'));
     insBody.appendChild(rangeRow('Height (svh)',s.height,40,250,1,v=>{s.height=v;renderDOM();}));
 
-    /* ---- interactivity block ---- */
+    /* ---- interactivity block (section-level; can be toggled off) ---- */
     const it=ensureInteractivity(s);
+    if(it.on===undefined) it.on=true;
     insBody.appendChild(subHead('Mouse interactivity'));
-    insBody.appendChild(rangeRow('track mouse',it.track,0,100,1,v=>it.track=v));
-    insBody.appendChild(rangeRow('momentum',it.momentum,0,100,1,v=>it.momentum=v));
-    insBody.appendChild(rangeRow('spring',it.spring,0,100,1,v=>it.spring=v));
-    const axWrap=document.createElement('div');axWrap.className='seg';
-    [['x','X only'],['y','Y only'],['both','Both']].forEach(([val,lbl])=>{
-      const b=document.createElement('button');b.textContent=lbl;if(it.axes===val)b.classList.add('on');
-      b.onclick=()=>{it.axes=val;axWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
-      axWrap.appendChild(b);
-    });
-    insBody.appendChild(axWrap);
-
-    /* ---- mouse trail (persistent wake) ---- */
-    if(!it.trail) it.trail={style:'none',decay:90,radius:12,strength:50};
-    const tr=it.trail;
-    insBody.appendChild(subHead('Mouse trail'));
-    const trParams=document.createElement('div');
-    function renderTrailParams(){
-      trParams.innerHTML='';
-      if(tr.style&&tr.style!=='none'){
-        trParams.appendChild(rangeRow('decay',tr.decay??90,0,100,1,v=>tr.decay=v));
-        trParams.appendChild(rangeRow('radius',tr.radius??12,1,40,1,v=>tr.radius=v));
-        trParams.appendChild(rangeRow('strength',tr.strength??50,0,100,1,v=>tr.strength=v));
+    const itToggle=document.createElement('div');itToggle.className='seg';
+    const itFields=document.createElement('div');
+    function renderItFields(){
+      itFields.innerHTML='';
+      if(it.on===false) return;
+      itFields.appendChild(rangeRow('track mouse',it.track,0,100,1,v=>it.track=v));
+      itFields.appendChild(rangeRow('momentum',it.momentum,0,100,1,v=>it.momentum=v));
+      itFields.appendChild(rangeRow('spring',it.spring,0,100,1,v=>it.spring=v));
+      itFields.appendChild(easeRow(it));
+      const axWrap=document.createElement('div');axWrap.className='seg';
+      [['x','X only'],['y','Y only'],['both','Both']].forEach(([val,lbl])=>{
+        const b=document.createElement('button');b.textContent=lbl;if(it.axes===val)b.classList.add('on');
+        b.onclick=()=>{it.axes=val;axWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+        axWrap.appendChild(b);
+      });
+      itFields.appendChild(axWrap);
+      /* ---- mouse trail (persistent wake) ---- */
+      if(!it.trail) it.trail={style:'none',decay:90,radius:12,strength:50};
+      const tr=it.trail;
+      itFields.appendChild(subHead('Mouse trail'));
+      const trParams=document.createElement('div');
+      function renderTrailParams(){
+        trParams.innerHTML='';
+        if(tr.style&&tr.style!=='none'){
+          if(tr.spring===undefined){tr.spring=40;tr.momentum=20;tr.easing='out';tr.opacity=100;}
+          trParams.appendChild(rangeRow('strength',tr.strength??50,0,100,1,v=>tr.strength=v));
+          trParams.appendChild(rangeRow('opacity',tr.opacity??100,0,100,1,v=>tr.opacity=v));
+          trParams.appendChild(rangeRow('spring',tr.spring??40,0,100,1,v=>tr.spring=v));
+          trParams.appendChild(rangeRow('momentum',tr.momentum??20,0,100,1,v=>tr.momentum=v));
+          trParams.appendChild(easeRow(tr));
+          trParams.appendChild(rangeRow('decay (linger)',tr.decay??90,0,100,1,v=>tr.decay=v));
+          trParams.appendChild(rangeRow('radius',tr.radius??12,1,40,1,v=>tr.radius=v));
+        }
       }
+      const styleSel=document.createElement('select');
+      [['none','none'],['smoke','smoke (dissipating)'],['blur','blur / glass smear'],['ripple','ripple wake'],['displace','displacement']].forEach(([v,lbl])=>{
+        const o=document.createElement('option');o.value=v;o.textContent=lbl;if((tr.style||'none')===v)o.selected=true;styleSel.appendChild(o);
+      });
+      styleSel.onchange=()=>{tr.style=styleSel.value;renderTrailParams();};
+      itFields.appendChild(styleSel);
+      renderTrailParams();itFields.appendChild(trParams);
     }
-    const styleSel=document.createElement('select');
-    [['none','none'],['smoke','smoke (dissipating)'],['blur','blur / glass smear'],['ripple','ripple wake'],['displace','displacement']].forEach(([v,lbl])=>{
-      const o=document.createElement('option');o.value=v;o.textContent=lbl;if((tr.style||'none')===v)o.selected=true;styleSel.appendChild(o);
+    [[true,'On'],[false,'Off']].forEach(([val,lbl])=>{
+      const b=document.createElement('button');b.textContent=lbl;if(it.on===val)b.classList.add('on');
+      b.onclick=()=>{it.on=val;itToggle.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');renderItFields();};
+      itToggle.appendChild(b);
     });
-    styleSel.onchange=()=>{tr.style=styleSel.value;renderTrailParams();};
-    insBody.appendChild(styleSel);
-    renderTrailParams();insBody.appendChild(trParams);
+    insBody.appendChild(itToggle);insBody.appendChild(itFields);renderItFields();
 
     insBody.appendChild(subHead('Transition → next'));
     insBody.appendChild(rangeRow('length (%)', s.transitionLength??40, 0, 100, 1, v=>{
@@ -1164,11 +1595,12 @@ function newLayer(kind){
   if(kind==='image') return {type:'image',src:'',fit:'cover',tint:'#15171c',bg:{mode:'solid',color:'#15171c',c1:'#241a12',c2:'#FF6A1A',angle:90}};
   if(kind==='video') return {type:'video',src:'',fit:'cover',tint:'#0c0e12',loop:true,muted:true,autoplay:true};
   if(kind==='text')  return {type:'text',content:'New text',size:40,weight:600,color:'#ffffff',x:6,y:60};
+  if(kind==='generator'){const g='lineWaves',params={};GEN[g].params.forEach(([p,min,max,def])=>params[p]=def!==undefined?def:(min+max)/2);return {type:'generator',gen:g,params};}
   return {type:'effect',fx:'flowfield',params:{scale:3,strength:0.1,speed:0.35}};
 }
 function newSection(n){
   return { id:'section-'+n, height:100, transitionOut:'dissolve', transitionLength:40,
-    interactivity:{track:60,momentum:20,spring:30,axes:'both'},
+    interactivity:{on:true,track:60,momentum:20,spring:30,axes:'both'},
     layers:[
       { type:'image', src:'', fit:'cover', tint:'#15171c', bg:{mode:'gradient',c1:'#241a12',c2:'#16202b',angle:90} },
       { type:'text', content:'NEW SECTION', size:64, weight:700, color:'#ffffff', x:6, y:50 }
@@ -1204,6 +1636,8 @@ function buildLayerBody(el,layer,rt,refresh){
       seg.appendChild(b);
     });
     el.appendChild(seg);
+    buildOpacityControl(el,layer);
+    buildBlendControl(el,layer);
     el.appendChild(note('Bunny video URL persists in the config. MP4/H.264 is safest across browsers; WebM for smaller files. Muted is required for autoplay. Upload is local preview only.'));
     return;
   }
@@ -1251,6 +1685,8 @@ function buildLayerBody(el,layer,rt,refresh){
     });
     el.appendChild(modeWrap);el.appendChild(fields);renderBgFields();
 
+    buildOpacityControl(el,layer);
+    buildBlendControl(el,layer);
     el.appendChild(note('Bunny URL persists in the config. Upload is local preview only — paste the URL to make it permanent.'));
   } else if(layer.type==='text'){
     const tRow=document.createElement('div');const t=document.createElement('input');t.type='text';t.value=layer.content;t.placeholder='text…';
@@ -1267,59 +1703,209 @@ function buildLayerBody(el,layer,rt,refresh){
     const cl=document.createElement('label');cl.className='f';cl.innerHTML='<span>color</span>';
     const c=document.createElement('input');c.type='color';c.value=layer.color;c.style.cssText='width:30px;height:22px;border:none;background:none;padding:0;cursor:pointer';
     c.oninput=()=>{layer.color=c.value;};cl.appendChild(c);el.appendChild(cl);
+    buildOpacityControl(el,layer);
+  } else if(layer.type==='generator'){
+    const gl=document.createElement('label');gl.className='f';gl.innerHTML='<span>generator</span>';
+    const gsel=document.createElement('select');GEN_NAMES.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if(n===layer.gen)o.selected=true;gsel.appendChild(o);});
+    gsel.onchange=()=>{layer.gen=gsel.value;layer.params={};delete layer.colors;delete layer.colorLists;GEN[layer.gen].params.forEach(([p,min,max,def])=>layer.params[p]=def!==undefined?def:(min+max)/2);
+      // Ghost Cursor reads the trail buffer as its content — give it a sensible
+      // custom trail so it works immediately (smoke wake, calm spring).
+      if(layer.gen==='ghostCursor' && (!layer.trail || layer.trail.mode!=='custom')){
+        layer.trail={mode:'custom',style:'smoke',strength:50,opacity:100,spring:30,momentum:15,easing:'out',decay:94,radius:10};
+      }
+      refresh();};
+    gl.appendChild(gsel);el.appendChild(gl);
+    GEN[layer.gen].params.forEach(([p,min,max,def])=>{const step=(max-min)/200;el.appendChild(rangeRow(p,layer.params[p]??(def!==undefined?def:(min+max)/2),min,max,step,v=>layer.params[p]=v));});
+    buildColorControls(el,layer,GEN[layer.gen]);
+    if(layer.gen==='ghostCursor'){ el.appendChild(note('Ghost Cursor renders its TRAIL as a glowing cloud — set Mouse trail below to Custom (auto-set on switch). Trail spring/decay shape the wake; bloom + grain + brightness shape the glow. Move your cursor over the canvas to see it.')); }
+    buildOpacityControl(el,layer);
+    buildBlendControl(el,layer);
+    buildMaskControls(el,layer);
+    buildInteractivityControls(el,layer);
+    buildTrailControls(el,layer);
   } else {
     const fl=document.createElement('label');fl.className='f';fl.innerHTML='<span>effect</span>';
     const fsel=document.createElement('select');FX_NAMES.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if(n===layer.fx)o.selected=true;fsel.appendChild(o);});
-    fsel.onchange=()=>{layer.fx=fsel.value;layer.params={};FX[layer.fx].params.forEach(([p,min,max,def])=>layer.params[p]=def!==undefined?def:(min+max)/2);refresh();};
+    fsel.onchange=()=>{layer.fx=fsel.value;layer.params={};delete layer.colors;delete layer.colorLists;FX[layer.fx].params.forEach(([p,min,max,def])=>layer.params[p]=def!==undefined?def:(min+max)/2);refresh();};
     fl.appendChild(fsel);el.appendChild(fl);
     FX[layer.fx].params.forEach(([p,min,max,def])=>{const step=(max-min)/200;el.appendChild(rangeRow(p,layer.params[p]??(def!==undefined?def:(min+max)/2),min,max,step,v=>layer.params[p]=v));});
-
-    /* ---- mask (B1): confine the effect to a feathered circle ----
-       Position in % of viewport, radius in % of viewport HEIGHT — fully
-       responsive, scales with any screen. mask.on=false (or absent) = the
-       classic full-screen behaviour, so old configs render unchanged. */
-    if(!layer.mask) layer.mask={on:false,x:50,y:50,radius:30,feather:40,invert:false};
-    const mk=layer.mask;
-    el.appendChild(subHead('Mask (effect area)'));
-    const mWrap=document.createElement('div');mWrap.className='seg';
-    const mFields=document.createElement('div');
-    function renderMaskFields(){
-      mFields.innerHTML='';
-      if(!mk.on) return;
-      const rx=rangeRow('pos x (%)',mk.x??50,0,100,1,v=>{mk.x=v;refreshHandles();});
-      rx.setAttribute('data-mrow','x');mFields.appendChild(rx);
-      const ry=rangeRow('pos y (%)',mk.y??50,0,100,1,v=>{mk.y=v;refreshHandles();});
-      ry.setAttribute('data-mrow','y');mFields.appendChild(ry);
-      const rr=rangeRow('radius',mk.radius??30,1,150,1,v=>{mk.radius=v;refreshHandles();});
-      rr.setAttribute('data-mrow','radius');mFields.appendChild(rr);
-      mFields.appendChild(rangeRow('feather',mk.feather??40,0,100,1,v=>mk.feather=v));
-      const inv=document.createElement('div');inv.className='seg';
-      [[false,'normal'],[true,'inverted']].forEach(([val,lbl])=>{
-        const b=document.createElement('button');b.textContent=lbl;if(!!mk.invert===val)b.classList.add('on');
-        b.onclick=()=>{mk.invert=val;inv.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
-        inv.appendChild(b);
-      });
-      mFields.appendChild(inv);
-      mFields.appendChild(note('Drag the amber dot on the canvas to move the mask; the rim grip resizes it. Viewport-relative — scales with any screen size.'));
-    }
-    [[false,'Full screen'],[true,'Circle']].forEach(([val,lbl])=>{
-      const b=document.createElement('button');b.textContent=lbl;if(!!mk.on===val)b.classList.add('on');
-      b.onclick=()=>{mk.on=val;mWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');renderMaskFields();refreshHandles();};
-      mWrap.appendChild(b);
-    });
-    el.appendChild(mWrap);el.appendChild(mFields);renderMaskFields();
-
-    /* mouse interactivity lives on the SECTION (it feeds every effect in the
-       section via uMouse/uHover) — link there so it's discoverable from here. */
-    el.appendChild(subHead('Mouse interactivity'));
-    const goSec=document.createElement('button');goSec.className='seccopy';goSec.style.marginTop='4px';
-    goSec.textContent='⚙ edit in section settings';
-    goSec.onclick=()=>{const _sx=CONFIG.sections.findIndex(sx=>sx.layers.includes(layer));if(_sx>=0)select(_sx,null);};
-    el.appendChild(goSec);
-    el.appendChild(note('Track / momentum / spring / axes / trail are section-level — they drive all effects in this section through uMouse + uHover.'));
+    buildColorControls(el,layer,FX[layer.fx]);
+    buildOpacityControl(el,layer);
+    buildBlendControl(el,layer);
+    buildMaskControls(el,layer);
+    buildInteractivityControls(el,layer);
+    buildTrailControls(el,layer);
   }
 }
 function note(t){const d=document.createElement('div');d.className='note';d.textContent=t;return d;}
+
+/* shared blend-mode control (image / video / generator / effect) */
+function buildOpacityControl(el,layer){
+  if(layer.opacity===undefined) layer.opacity=1;
+  el.appendChild(rangeRow('opacity',layer.opacity,0,1,0.01,v=>{layer.opacity=v;}));
+}
+function buildColorControls(el,layer,def){
+  if(!def.colors && !def.colorList) return;
+  el.appendChild(subHead('Colors'));
+  // single colours
+  (def.colors||[]).forEach(([name,defHex])=>{
+    if(!layer.colors) layer.colors={};
+    if(layer.colors[name]===undefined) layer.colors[name]=defHex;
+    el.appendChild(colorRow(name,layer.colors[name],hex=>{layer.colors[name]=hex;}));
+  });
+  // colour list (add / remove)
+  if(def.colorList){
+    const cl=def.colorList;
+    if(!layer.colorLists) layer.colorLists={};
+    if(!layer.colorLists[cl.name]) layer.colorLists[cl.name]=cl.default.slice();
+    const list=layer.colorLists[cl.name];
+    const host=document.createElement('div');
+    function renderList(){
+      host.innerHTML='';
+      list.forEach((hex,i)=>{
+        const row=colorRow(cl.name+' '+(i+1),hex,h=>{list[i]=h;},()=>{
+          if(list.length>1){list.splice(i,1);renderList();}
+        });
+        host.appendChild(row);
+      });
+      if(list.length<(cl.max||MAX_COLORS)){
+        const add=document.createElement('button');add.className='addcolor';add.textContent='+ add color';
+        add.onclick=()=>{list.push('#ffffff');renderList();};
+        host.appendChild(add);
+      }
+    }
+    el.appendChild(host);renderList();
+  }
+}
+/* one React-Bits-style colour row: swatch (native picker behind it) + hex field,
+   optional remove ✕ */
+function colorRow(label,hex,onChange,onRemove){
+  const row=document.createElement('div');row.className='colorrow';
+  const sw=document.createElement('label');sw.className='swatch';sw.style.background=hex;
+  const pick=document.createElement('input');pick.type='color';pick.value=normHex(hex);
+  pick.oninput=()=>{const h=pick.value;sw.style.background=h;hexIn.value=h;onChange(h);};
+  sw.appendChild(pick);
+  const name=document.createElement('span');name.className='clabel';name.textContent=label;
+  const hexIn=document.createElement('input');hexIn.className='hexin';hexIn.type='text';hexIn.value=hex;
+  hexIn.onchange=()=>{let h=hexIn.value.trim();if(!h.startsWith('#'))h='#'+h;if(/^#[0-9a-fA-F]{6}$/.test(h)){sw.style.background=h;pick.value=h;onChange(h);}else{hexIn.value=hex;}};
+  row.appendChild(sw);row.appendChild(name);row.appendChild(hexIn);
+  if(onRemove){const x=document.createElement('button');x.className='cremove';x.textContent='✕';x.onclick=onRemove;row.appendChild(x);}
+  return row;
+}
+function normHex(h){h=(h||'#000000').trim();if(!h.startsWith('#'))h='#'+h;return /^#[0-9a-fA-F]{6}$/.test(h)?h:'#000000';}
+
+/* shared blend-mode control (image / video / generator / effect) */
+function buildBlendControl(el,layer){
+  el.appendChild(subHead('Blend mode'));
+  const bl=document.createElement('label');bl.className='f';bl.innerHTML='<span>blend</span>';
+  const bsel=document.createElement('select');
+  BLEND_MODES.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if((layer.blend||'normal')===n)o.selected=true;bsel.appendChild(o);});
+  bsel.onchange=()=>{layer.blend=bsel.value;};
+  bl.appendChild(bsel);el.appendChild(bl);
+}
+
+/* shared mask controls (used by effect + generator layers) */
+function buildMaskControls(el,layer){
+  if(!layer.mask) layer.mask={on:false,x:50,y:50,radius:30,feather:40,invert:false};
+  const mk=layer.mask;
+  el.appendChild(subHead('Mask (area)'));
+  const mWrap=document.createElement('div');mWrap.className='seg';
+  const mFields=document.createElement('div');
+  function renderMaskFields(){
+    mFields.innerHTML='';
+    if(!mk.on) return;
+    const rx=rangeRow('pos x (%)',mk.x??50,0,100,1,v=>{mk.x=v;refreshHandles();});
+    rx.setAttribute('data-mrow','x');mFields.appendChild(rx);
+    const ry=rangeRow('pos y (%)',mk.y??50,0,100,1,v=>{mk.y=v;refreshHandles();});
+    ry.setAttribute('data-mrow','y');mFields.appendChild(ry);
+    const rr=rangeRow('radius',mk.radius??30,1,150,1,v=>{mk.radius=v;refreshHandles();});
+    rr.setAttribute('data-mrow','radius');mFields.appendChild(rr);
+    mFields.appendChild(rangeRow('feather',mk.feather??40,0,100,1,v=>mk.feather=v));
+    const inv=document.createElement('div');inv.className='seg';
+    [[false,'normal'],[true,'inverted']].forEach(([val,lbl])=>{
+      const b=document.createElement('button');b.textContent=lbl;if(!!mk.invert===val)b.classList.add('on');
+      b.onclick=()=>{mk.invert=val;inv.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+      inv.appendChild(b);
+    });
+    mFields.appendChild(inv);
+    mFields.appendChild(note('Drag the amber dot on the canvas to move the mask; the rim grip resizes it. Viewport-relative — scales with any screen size.'));
+  }
+  [[false,'Full screen'],[true,'Circle']].forEach(([val,lbl])=>{
+    const b=document.createElement('button');b.textContent=lbl;if(!!mk.on===val)b.classList.add('on');
+    b.onclick=()=>{mk.on=val;mWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');renderMaskFields();refreshHandles();};
+    mWrap.appendChild(b);
+  });
+  el.appendChild(mWrap);el.appendChild(mFields);renderMaskFields();
+}
+
+/* shared per-layer interactivity controls (used by effect + generator layers) */
+function buildInteractivityControls(el,layer){
+  el.appendChild(subHead('Mouse interactivity'));
+  if(!layer.interactivity) layer.interactivity={mode:'section'};
+  const li=layer.interactivity;
+  if(!li.mode) li.mode='section';
+  const modeWrap2=document.createElement('div');modeWrap2.className='seg';
+  const liFields=document.createElement('div');
+  function renderLiFields(){
+    liFields.innerHTML='';
+    if(li.mode!=='custom') return;
+    const sec=ensureInteractivity(CONFIG.sections.find(sx=>sx.layers.includes(layer))||{});
+    if(li.track===undefined){li.track=sec.track??60;li.momentum=sec.momentum??20;li.spring=sec.spring??30;li.axes=sec.axes??'both';}
+    liFields.appendChild(rangeRow('track mouse',li.track,0,100,1,v=>li.track=v));
+    liFields.appendChild(rangeRow('momentum',li.momentum,0,100,1,v=>li.momentum=v));
+    liFields.appendChild(rangeRow('spring',li.spring,0,100,1,v=>li.spring=v));
+    liFields.appendChild(easeRow(li));
+    const ax=document.createElement('div');ax.className='seg';
+    [['x','X only'],['y','Y only'],['both','Both']].forEach(([val,lbl])=>{
+      const b=document.createElement('button');b.textContent=lbl;if(li.axes===val)b.classList.add('on');
+      b.onclick=()=>{li.axes=val;ax.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');};
+      ax.appendChild(b);
+    });
+    liFields.appendChild(ax);
+    liFields.appendChild(note('Custom: runs its own mouse spring, independent of the section. Trail wake still uses the section trail buffer.'));
+  }
+  [['section','Section'],['custom','Custom'],['off','Off']].forEach(([val,lbl])=>{
+    const b=document.createElement('button');b.textContent=lbl;if(li.mode===val)b.classList.add('on');
+    b.onclick=()=>{li.mode=val;modeWrap2.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');renderLiFields();};
+    modeWrap2.appendChild(b);
+  });
+  el.appendChild(modeWrap2);el.appendChild(liFields);renderLiFields();
+}
+
+/* per-layer trail control — section / custom / off, mirrors interactivity.
+   custom reveals style + strength + decay + radius inline. */
+function buildTrailControls(el,layer){
+  el.appendChild(subHead('Mouse trail'));
+  if(!layer.trail) layer.trail={mode:'section'};
+  const lt=layer.trail;
+  if(!lt.mode) lt.mode='section';
+  const modeWrap=document.createElement('div');modeWrap.className='seg';
+  const fields=document.createElement('div');
+  function renderFields(){
+    fields.innerHTML='';
+    if(lt.mode!=='custom') return;
+    if(lt.style===undefined){lt.style='smoke';lt.strength=lt.strength??50;lt.decay=lt.decay??90;lt.radius=lt.radius??12;}
+    if(lt.spring===undefined){lt.spring=40;lt.momentum=20;lt.easing='out';lt.opacity=100;}
+    const styleWrap=document.createElement('label');styleWrap.className='f';styleWrap.innerHTML='<span>style</span>';
+    const ssel=document.createElement('select');
+    ['smoke','blur','ripple','displace'].forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;if(lt.style===s)o.selected=true;ssel.appendChild(o);});
+    ssel.onchange=()=>{lt.style=ssel.value;};styleWrap.appendChild(ssel);fields.appendChild(styleWrap);
+    fields.appendChild(rangeRow('strength',lt.strength,0,100,1,v=>lt.strength=v));
+    fields.appendChild(rangeRow('opacity',lt.opacity,0,100,1,v=>lt.opacity=v));
+    fields.appendChild(rangeRow('spring',lt.spring,0,100,1,v=>lt.spring=v));
+    fields.appendChild(rangeRow('momentum',lt.momentum,0,100,1,v=>lt.momentum=v));
+    fields.appendChild(easeRow(lt));
+    fields.appendChild(rangeRow('decay (linger)',lt.decay,50,99,1,v=>lt.decay=v));
+    fields.appendChild(rangeRow('radius',lt.radius,2,40,1,v=>lt.radius=v));
+    fields.appendChild(note('Spring/momentum/easing control how the wake CHASES the cursor (lower spring + momentum = calmer, less bounce). Decay = how long it lingers. Custom keeps its OWN trail buffer (2 RTs + 1 pass/frame).'));
+  }
+  [['section','Section'],['custom','Custom'],['off','Off']].forEach(([val,lbl])=>{
+    const b=document.createElement('button');b.textContent=lbl;if(lt.mode===val)b.classList.add('on');
+    b.onclick=()=>{lt.mode=val;modeWrap.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');renderFields();};
+    modeWrap.appendChild(b);
+  });
+  el.appendChild(modeWrap);el.appendChild(fields);renderFields();
+}
 
 /* ---- toolbar / panel toggles ---- */
 document.getElementById('dockToggle').onclick=()=>document.body.classList.remove('ui-closed');
@@ -1362,14 +1948,29 @@ applyZoom();
    from the authoring tool's behaviour.
    ============================================================================ */
 function fxRegistrySource(){
-  // rebuild the FX object as source text (params arrays + glsl strings)
+  // rebuild the FX object as source text (params arrays + glsl strings + colours)
   let parts=[];
   for(const name in FX){
     const f=FX[name];
     const params=JSON.stringify(f.params);
-    // glsl may contain ${NOISE_GLSL}; bake it in literally
     const glsl=f.glsl.replace('${NOISE_GLSL}', NOISE_GLSL);
-    parts.push(`${name}:{params:${params},glsl:${JSON.stringify(glsl)}}`);
+    let extra='';
+    if(f.colors) extra+=`,colors:${JSON.stringify(f.colors)}`;
+    if(f.colorList) extra+=`,colorList:${JSON.stringify(f.colorList)}`;
+    parts.push(`${name}:{params:${params},glsl:${JSON.stringify(glsl)}${extra}}`);
+  }
+  return '{'+parts.join(',\n')+'}';
+}
+function genRegistrySource(){
+  let parts=[];
+  for(const name in GEN){
+    const g=GEN[name];
+    const params=JSON.stringify(g.params);
+    const glsl=g.glsl.replace('${NOISE_GLSL}', NOISE_GLSL);
+    let extra='';
+    if(g.colors) extra+=`,colors:${JSON.stringify(g.colors)}`;
+    if(g.colorList) extra+=`,colorList:${JSON.stringify(g.colorList)}`;
+    parts.push(`${name}:{params:${params},glsl:${JSON.stringify(glsl)}${extra}}`);
   }
   return '{'+parts.join(',\n')+'}';
 }
@@ -1383,8 +1984,19 @@ function engineSource(){
 import * as THREE from "three";
 const VS=${JSON.stringify(VS)};
 const FX=${fxRegistrySource()};
+const GEN=${genRegistrySource()};
 const HEADER=${JSON.stringify(HEADER)};
-function effectFrag(n){return HEADER+FX[n].glsl+"void main(){vec4 base=texture2D(uTex,vUv);vec2 uv=trailWarp(vUv);vec4 c=fx(uv);float mm=maskAt(vUv);vec4 o=mix(base,c,mm);o.a*=uOpacity;gl_FragColor=o;}";}
+const BLEND_ID=${JSON.stringify(BLEND_ID)};
+const BLEND_GLSL=${JSON.stringify(BLEND_GLSL)};
+const MAX_COLORS=${MAX_COLORS};
+const EASE={linear:m=>m,ease:m=>m*m*(3-2*m),in:m=>m*m,out:m=>1-(1-m)*(1-m)};
+function hexToVec3(hex){const h=(hex||'#000000').replace('#','');const r=parseInt(h.substring(0,2),16)/255,g=parseInt(h.substring(2,4),16)/255,b=parseInt(h.substring(4,6),16)/255;return new THREE.Vector3(isNaN(r)?0:r,isNaN(g)?0:g,isNaN(b)?0:b);}
+const capit=p=>'u'+p[0].toUpperCase()+p.slice(1);
+function colorDecls(def){let s='';(def.colors||[]).forEach(([name])=>{s+="uniform vec3 "+capit(name)+";";});if(def.colorList){s+="uniform vec3 "+capit(def.colorList.name)+"["+MAX_COLORS+"];uniform int "+capit(def.colorList.name)+"Count;";}return s;}
+function addColorUniforms(u,def){(def.colors||[]).forEach(([name])=>{u[capit(name)]={value:new THREE.Vector3(1,1,1)};});if(def.colorList){const arr=[];for(let i=0;i<MAX_COLORS;i++)arr.push(new THREE.Vector3(0,0,0));u[capit(def.colorList.name)]={value:arr};u[capit(def.colorList.name)+'Count']={value:0};}}
+function setColorUniforms(mat,layer,def){(def.colors||[]).forEach(([name,defHex])=>{const k=capit(name);if(mat.uniforms[k]){const hex=(layer.colors&&layer.colors[name])||defHex;mat.uniforms[k].value.copy(hexToVec3(hex));}});if(def.colorList){const k=capit(def.colorList.name);const list=(layer.colorLists&&layer.colorLists[def.colorList.name])||def.colorList.default;if(mat.uniforms[k]){for(let i=0;i<MAX_COLORS;i++){mat.uniforms[k].value[i].copy(hexToVec3(list[i]||'#000000'));}mat.uniforms[k+'Count'].value=Math.min(list.length,MAX_COLORS);}}}
+function effectFrag(n){return HEADER+BLEND_GLSL+"uniform int uBlendMode;"+colorDecls(FX[n])+FX[n].glsl+"void main(){vec4 base=texture2D(uTex,vUv);vec2 uv=trailWarp(vUv);vec4 c=fx(uv);float mm=maskAt(vUv);vec3 blended=blendPair(base.rgb,c.rgb,uBlendMode);vec3 outc=mix(base.rgb,blended,mm*uOpacity);vec4 o=vec4(outc,base.a);gl_FragColor=o;}";}
+function generatorFrag(n){return HEADER+colorDecls(GEN[n])+GEN[n].glsl+"void main(){vec2 uv=trailWarp(vUv);vec4 c=gen(uv);float mm=maskAt(vUv);c.a*=mm*uOpacity;gl_FragColor=c;}";}
 
 // render one section config into one canvas, driven by scroll over its host element
 function mountSection(host){
@@ -1399,16 +2011,19 @@ function mountSection(host){
   const scene=new THREE.Scene(); scene.add(quad);
   const mkRT=()=>new THREE.WebGLRenderTarget(1,1,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});
   let rtA=mkRT(),rtB=mkRT();
+  let genRT=mkRT();
   let trailA=mkRT(),trailB=mkRT(),trailInit=false;
   const TRAIL_ID={none:0,smoke:1,blur:2,ripple:3,displace:4};
   const trailMat=new THREE.ShaderMaterial({uniforms:{uPrev:{value:null},uMouse:{value:new THREE.Vector2(.5,.5)},uDecay:{value:0.9},uRadius:{value:0.06},uAdd:{value:1.0},uAspect:{value:1.0}},vertexShader:VS,
     fragmentShader:"precision highp float;varying vec2 vUv;uniform sampler2D uPrev;uniform vec2 uMouse;uniform float uDecay,uRadius,uAdd,uAspect;void main(){float prev=texture2D(uPrev,vUv).r*uDecay;vec2 d=vUv-uMouse;d.x*=uAspect;float stamp=smoothstep(uRadius,0.0,length(d))*uAdd;float v=max(prev,stamp);gl_FragColor=vec4(v,v,v,1.0);}"});
   const copyMat=new THREE.ShaderMaterial({uniforms:{uTex:{value:null},uOpacity:{value:1}},vertexShader:VS,
     fragmentShader:"precision highp float;varying vec2 vUv;uniform sampler2D uTex;uniform float uOpacity;void main(){vec4 c=texture2D(uTex,vUv);gl_FragColor=vec4(c.rgb,c.a*uOpacity);}"});
-  const overMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{uBase:{value:null},uOver:{value:null}},vertexShader:VS,
-    fragmentShader:"precision highp float;varying vec2 vUv;uniform sampler2D uBase,uOver;void main(){vec4 b=texture2D(uBase,vUv);vec4 o=texture2D(uOver,vUv);gl_FragColor=mix(b,o,o.a);}"});
+  const overMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{uBase:{value:null},uOver:{value:null},uBlendMode:{value:0},uOpacity:{value:1}},vertexShader:VS,
+    fragmentShader:"precision highp float;varying vec2 vUv;uniform sampler2D uBase,uOver;uniform int uBlendMode;uniform float uOpacity;"+BLEND_GLSL+"void main(){vec4 b=texture2D(uBase,vUv);vec4 o=texture2D(uOver,vUv);gl_FragColor=blendComposite(b,o,uBlendMode,uOpacity);}"});
   const ctxCanvas=document.createElement('canvas');ctxCanvas.width=1280;ctxCanvas.height=800;const ctx2d=ctxCanvas.getContext('2d');
   const images={}, videos={}, mouse=new THREE.Vector2(.5,.5), vel=new THREE.Vector2(0,0); let hover=0;
+  const fxState=new Map();   // layer -> {mouse,vel,hover} for custom-interactivity effects
+  const NEUTRAL=new THREE.Vector2(.5,.5);
   function getImage(src){ if(!src)return null; if(images[src]!==undefined)return images[src]; images[src]=null;
     const img=new Image(); img.crossOrigin='anonymous'; img.onload=()=>images[src]=img; img.onerror=()=>{const i2=new Image();i2.onload=()=>images[src]=i2;i2.onerror=()=>images[src]='error';i2.src=src;}; img.src=src; return null; }
   function getVideo(layer){ const src=layer.src; if(!src)return null;
@@ -1432,9 +2047,15 @@ function mountSection(host){
     }
   }
   function ensureMat(layer){ if(layer._mat&&layer._fx===layer.fx)return layer._mat;
-    const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(1,1)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0}};
+    const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(1,1)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0},uBlendMode:{value:0}};
     FX[layer.fx].params.forEach(p=>u['u'+p[0][0].toUpperCase()+p[0].slice(1)]={value:0});
+    addColorUniforms(u,FX[layer.fx]);
     layer._mat=new THREE.ShaderMaterial({uniforms:u,vertexShader:VS,fragmentShader:effectFrag(layer.fx),transparent:true,depthWrite:false});layer._fx=layer.fx;return layer._mat; }
+  function ensureGenMat(layer){ if(layer._mat&&layer._gen===layer.gen)return layer._mat;
+    const u={uTex:{value:null},uTime:{value:0},uProg:{value:0},uHover:{value:0},uOpacity:{value:1},uMouse:{value:new THREE.Vector2(.5,.5)},uRes:{value:new THREE.Vector2(1,1)},uTrail:{value:null},uTrailStyle:{value:0},uTrailStrength:{value:0},uMaskOn:{value:0},uMaskPos:{value:new THREE.Vector2(.5,.5)},uMaskRadius:{value:0.3},uMaskFeather:{value:0.4},uMaskInvert:{value:0},uBlendMode:{value:0}};
+    GEN[layer.gen].params.forEach(p=>u['u'+p[0][0].toUpperCase()+p[0].slice(1)]={value:0});
+    addColorUniforms(u,GEN[layer.gen]);
+    layer._mat=new THREE.ShaderMaterial({uniforms:u,vertexShader:VS,fragmentShader:generatorFrag(layer.gen),transparent:true,depthWrite:false});layer._gen=layer.gen;return layer._mat; }
   function contentTexture(list){ctx2d.clearRect(0,0,1280,800);list.forEach(drawContent);const t=new THREE.CanvasTexture(ctxCanvas);t.minFilter=THREE.LinearFilter;return t;}
   function updateTrail(W,H,time){
     const trcfg=(cfg.interactivity&&cfg.interactivity.trail)||{style:'none'};
@@ -1443,33 +2064,66 @@ function mountSection(host){
     if(!trailInit){trailMat.uniforms.uPrev.value=trailB.texture;trailMat.uniforms.uAdd.value=0;trailMat.uniforms.uDecay.value=0;quad.material=trailMat;renderer.setRenderTarget(trailA);renderer.render(scene,cam);renderer.setRenderTarget(trailB);renderer.render(scene,cam);trailInit=true;}
     const decay=Math.min(0.995,(trcfg.decay??90)/100*0.5+0.5);
     const radius=((trcfg.radius??12)/100)*0.5;
-    quad.material=trailMat;trailMat.uniforms.uPrev.value=trailA.texture;trailMat.uniforms.uMouse.value.copy(mouse);trailMat.uniforms.uDecay.value=decay;trailMat.uniforms.uRadius.value=radius;trailMat.uniforms.uAdd.value=1.0;trailMat.uniforms.uAspect.value=W/H;
+    const _tc=trailCursor(_secTrailOwner,'_trailSpring',trcfg);quad.material=trailMat;trailMat.uniforms.uPrev.value=trailA.texture;trailMat.uniforms.uMouse.value.copy(_tc);trailMat.uniforms.uDecay.value=decay;trailMat.uniforms.uRadius.value=radius;trailMat.uniforms.uAdd.value=(trcfg.opacity??100)/100;trailMat.uniforms.uAspect.value=W/H;
     renderer.setRenderTarget(trailB);renderer.render(scene,cam);[trailA,trailB]=[trailB,trailA];
+  }
+  function updateLayerTrail(layer,W,H){
+    const lt=layer.trail;
+    if(!lt||lt.mode!=='custom'||!lt.style||lt.style==='none'){ if(layer._trailA){layer._trailA.dispose();layer._trailB.dispose();layer._trailA=layer._trailB=null;layer._trailInit=false;} return; }
+    if(!layer._trailA){layer._trailA=mkRT();layer._trailB=mkRT();layer._trailInit=false;}
+    if(layer._trailA.width!==W||layer._trailA.height!==H){layer._trailA.setSize(W,H);layer._trailB.setSize(W,H);}
+    if(!layer._trailInit){trailMat.uniforms.uPrev.value=layer._trailB.texture;trailMat.uniforms.uAdd.value=0;trailMat.uniforms.uDecay.value=0;quad.material=trailMat;renderer.setRenderTarget(layer._trailA);renderer.render(scene,cam);renderer.setRenderTarget(layer._trailB);renderer.render(scene,cam);layer._trailInit=true;}
+    const decay=Math.min(0.995,(lt.decay??90)/100*0.5+0.5);const radius=((lt.radius??12)/100)*0.5;
+    const _ltc=trailCursor(layer,'_trailSpring',lt);quad.material=trailMat;trailMat.uniforms.uPrev.value=layer._trailA.texture;trailMat.uniforms.uMouse.value.copy(_ltc);trailMat.uniforms.uDecay.value=decay;trailMat.uniforms.uRadius.value=radius;trailMat.uniforms.uAdd.value=(lt.opacity??100)/100;trailMat.uniforms.uAspect.value=W/H;
+    renderer.setRenderTarget(layer._trailB);renderer.render(scene,cam);[layer._trailA,layer._trailB]=[layer._trailB,layer._trailA];
+  }
+  function resolveTrail(layer,trcfg,trActive){
+    const lt=layer.trail;const mode=(lt&&lt.mode)||'section';
+    if(mode==='off')return{tex:null,styleId:0,strength:0};
+    if(mode==='custom'){const active=lt.style&&lt.style!=='none'&&layer._trailA;return{tex:active?layer._trailA.texture:null,styleId:TRAIL_ID[lt.style]||0,strength:((lt.strength??50)/100)*0.6};}
+    return{tex:trActive?trailA.texture:null,styleId:TRAIL_ID[trcfg.style]||0,strength:((trcfg.strength??50)/100)*0.6};
   }
   function render(prog,time){
     const W=host.clientWidth,H=host.clientHeight;
     if(W<2||H<2) return;   // layout not ready yet
-    if(canvas.width!==W||canvas.height!==H){renderer.setSize(W,H,false);rtA.setSize(W,H);rtB.setSize(W,H);}
+    if(canvas.width!==W||canvas.height!==H){renderer.setSize(W,H,false);rtA.setSize(W,H);rtB.setSize(W,H);genRT.setSize(W,H);}
     updateTrail(W,H,time);
+    cfg.layers.forEach(l=>updateLayerTrail(l,W,H));
     const trcfg=(cfg.interactivity&&cfg.interactivity.trail)||{style:'none'};
     const trActive=trcfg.style&&trcfg.style!=='none';
     let glTex=null,pingOut=rtB,pingIn=rtA,pending=[],haveBase=false;
     function commit(){ if(!pending.length)return; const c=contentTexture(pending);pending=[];
       if(!haveBase){quad.material=copyMat;copyMat.uniforms.uTex.value=c;copyMat.uniforms.uOpacity.value=1;renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;}
-      else{quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=c;renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];}
+      else{quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=c;overMat.uniforms.uBlendMode.value=0;overMat.uniforms.uOpacity.value=1;renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];}
       c.dispose(); }
     cfg.layers.forEach(layer=>{
       if(layer.hidden) return;
       if(layer.type==='effect'){commit(); if(!haveBase){const c=contentTexture([]);quad.material=copyMat;copyMat.uniforms.uTex.value=c;renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;c.dispose();}
-        const m=ensureMat(layer);quad.material=m;m.uniforms.uTex.value=glTex;m.uniforms.uTime.value=time;m.uniforms.uProg.value=prog;m.uniforms.uHover.value=hover;m.uniforms.uMouse.value.copy(mouse);m.uniforms.uOpacity.value=1;if(m.uniforms.uRes)m.uniforms.uRes.value.set(W,H);
-        if(m.uniforms.uTrail)m.uniforms.uTrail.value=trActive?trailA.texture:null;
-        if(m.uniforms.uTrailStyle)m.uniforms.uTrailStyle.value=TRAIL_ID[trcfg.style]||0;
-        if(m.uniforms.uTrailStrength)m.uniforms.uTrailStrength.value=((trcfg.strength??50)/100)*0.6;
+        const m=ensureMat(layer);quad.material=m;m.uniforms.uTex.value=glTex;m.uniforms.uTime.value=time;m.uniforms.uProg.value=prog;const em=effMouse(layer);m.uniforms.uHover.value=em.hover;m.uniforms.uMouse.value.copy(em.mouse);m.uniforms.uOpacity.value=(layer.opacity??1);if(m.uniforms.uRes)m.uniforms.uRes.value.set(W,H);
+        {const _tr=resolveTrail(layer,trcfg,trActive);if(m.uniforms.uTrail)m.uniforms.uTrail.value=_tr.tex;if(m.uniforms.uTrailStyle)m.uniforms.uTrailStyle.value=_tr.styleId;if(m.uniforms.uTrailStrength)m.uniforms.uTrailStrength.value=_tr.strength;}
         const mk=layer.mask||{};
         if(m.uniforms.uMaskOn)m.uniforms.uMaskOn.value=mk.on?1:0;
         if(mk.on&&m.uniforms.uMaskPos){m.uniforms.uMaskPos.value.set((mk.x??50)/100,1-(mk.y??50)/100);m.uniforms.uMaskRadius.value=(mk.radius??30)/100;m.uniforms.uMaskFeather.value=(mk.feather??40)/100;m.uniforms.uMaskInvert.value=mk.invert?1:0;}
         FX[layer.fx].params.forEach(p=>{const k='u'+p[0][0].toUpperCase()+p[0].slice(1);if(m.uniforms[k])m.uniforms[k].value=layer.params[p[0]]??(p.length>3?p[3]:((p[1]+p[2])/2));});
+        setColorUniforms(m,layer,FX[layer.fx]);
+        if(m.uniforms.uBlendMode)m.uniforms.uBlendMode.value=BLEND_ID[layer.blend||'normal']||0;
         renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];
+      } else if(layer.type==='generator'){ commit();
+        const m=ensureGenMat(layer);quad.material=m;m.uniforms.uTime.value=time;m.uniforms.uProg.value=prog;m.uniforms.uOpacity.value=1;const em=effMouse(layer);m.uniforms.uHover.value=em.hover;m.uniforms.uMouse.value.copy(em.mouse);if(m.uniforms.uRes)m.uniforms.uRes.value.set(W,H);
+        {const _tr=resolveTrail(layer,trcfg,trActive);if(m.uniforms.uTrail)m.uniforms.uTrail.value=_tr.tex;if(m.uniforms.uTrailStyle)m.uniforms.uTrailStyle.value=_tr.styleId;if(m.uniforms.uTrailStrength)m.uniforms.uTrailStrength.value=_tr.strength;}
+        const gmk=layer.mask||{};
+        if(m.uniforms.uMaskOn)m.uniforms.uMaskOn.value=gmk.on?1:0;
+        if(gmk.on&&m.uniforms.uMaskPos){m.uniforms.uMaskPos.value.set((gmk.x??50)/100,1-(gmk.y??50)/100);m.uniforms.uMaskRadius.value=(gmk.radius??30)/100;m.uniforms.uMaskFeather.value=(gmk.feather??40)/100;m.uniforms.uMaskInvert.value=gmk.invert?1:0;}
+        GEN[layer.gen].params.forEach(p=>{const k='u'+p[0][0].toUpperCase()+p[0].slice(1);if(m.uniforms[k])m.uniforms[k].value=layer.params[p[0]]??(p.length>3?p[3]:((p[1]+p[2])/2));});
+        setColorUniforms(m,layer,GEN[layer.gen]);
+        renderer.setRenderTarget(genRT);renderer.render(scene,cam);const genTex=genRT.texture;
+        if(!haveBase){quad.material=copyMat;copyMat.uniforms.uTex.value=genTex;copyMat.uniforms.uOpacity.value=(layer.opacity??1);renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;}
+        else{quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=genTex;overMat.uniforms.uBlendMode.value=BLEND_ID[layer.blend||'normal']||0;overMat.uniforms.uOpacity.value=(layer.opacity??1);renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];}
+      } else if((layer.type==='image'||layer.type==='video'||layer.type==='text') && ((layer.blend&&layer.blend!=='normal')||((layer.opacity??1)<1))){ commit();
+        const c=contentTexture([layer]);
+        if(!haveBase){quad.material=copyMat;copyMat.uniforms.uTex.value=c;copyMat.uniforms.uOpacity.value=(layer.opacity??1);renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];haveBase=true;}
+        else{quad.material=overMat;overMat.uniforms.uBase.value=glTex;overMat.uniforms.uOver.value=c;overMat.uniforms.uBlendMode.value=BLEND_ID[layer.blend||'normal']||0;overMat.uniforms.uOpacity.value=(layer.opacity??1);renderer.setRenderTarget(pingOut);renderer.render(scene,cam);glTex=pingOut.texture;[pingIn,pingOut]=[pingOut,pingIn];}
+        c.dispose();
       } else pending.push(layer);
     });
     commit();
@@ -1478,10 +2132,23 @@ function mountSection(host){
   }
   // interactivity integrate
   let mRaw=new THREE.Vector2(.5,.5),hRaw=0;
+  const _secTrailOwner={};
   host.addEventListener('pointermove',e=>{const r=host.getBoundingClientRect();mRaw.set((e.clientX-r.left)/r.width,1-(e.clientY-r.top)/r.height);hRaw=1;});
   host.addEventListener('pointerleave',()=>hRaw=0);
   const it=cfg.interactivity||{track:0,momentum:0,spring:30,axes:'both'};
-  function stepMouse(){const tr=(it.track||0)/100,mo=(it.momentum||0)/100,sp=(it.spring||0)/100;let tx=mRaw.x,ty=mRaw.y;if(it.axes==='x')ty=.5;if(it.axes==='y')tx=.5;const k=.04+sp*.30,dmp=.85-mo*.20;vel.x=(vel.x+(tx-mouse.x)*k)*dmp;vel.y=(vel.y+(ty-mouse.y)*k)*dmp;mouse.x+=vel.x;mouse.y+=vel.y;hover+=((hRaw*tr)-hover)*.1;}
+  const itOn=!!cfg.interactivity && cfg.interactivity.on!==false;
+  function spring(st,iv){const tr=(iv.track||0)/100,mo=(iv.momentum||0)/100,sp=(iv.spring||0)/100;let tx=mRaw.x,ty=mRaw.y;if(iv.axes==='x')ty=.5;if(iv.axes==='y')tx=.5;const k=.04+sp*.30,dmp=.85-mo*.20;st.vel.x=(st.vel.x+(tx-st.mouse.x)*k)*dmp;st.vel.y=(st.vel.y+(ty-st.mouse.y)*k)*dmp;const ez=EASE[iv.easing||'linear']||EASE.linear;if((iv.easing||'linear')!=='linear'){const dx=tx-st.mouse.x,dy=ty-st.mouse.y;const dist=Math.min(1,Math.sqrt(dx*dx+dy*dy)*2.0);const shape=ez(1-dist);st.vel.x*=(1-shape*0.4);st.vel.y*=(1-shape*0.4);}st.mouse.x+=st.vel.x;st.mouse.y+=st.vel.y;st.hover+=((hRaw*tr)-st.hover)*.1;}
+  function trailCursor(owner,key,trc){let st=owner[key];if(!st){st={mouse:new THREE.Vector2(mRaw.x,mRaw.y),vel:new THREE.Vector2(0,0),hover:0};owner[key]=st;}spring(st,{track:100,momentum:trc.momentum??20,spring:trc.spring??40,axes:'both',easing:trc.easing||'linear'});return st.mouse;}
+  function stepMouse(){
+    if(itOn){const iv=it;const tr=(iv.track||0)/100,mo=(iv.momentum||0)/100,sp=(iv.spring||0)/100;let tx=mRaw.x,ty=mRaw.y;if(iv.axes==='x')ty=.5;if(iv.axes==='y')tx=.5;const k=.04+sp*.30,dmp=.85-mo*.20;vel.x=(vel.x+(tx-mouse.x)*k)*dmp;vel.y=(vel.y+(ty-mouse.y)*k)*dmp;mouse.x+=vel.x;mouse.y+=vel.y;hover+=((hRaw*tr)-hover)*.1;}
+    else hover+=(0-hover)*.1;
+  }
+  function effMouse(layer){
+    const liv=layer.interactivity;
+    if(liv&&liv.mode==='custom'){let st=fxState.get(layer);if(!st){st={mouse:new THREE.Vector2(.5,.5),vel:new THREE.Vector2(0,0),hover:0};fxState.set(layer,st);}spring(st,liv);return st;}
+    if(liv&&liv.mode==='off')return {mouse:NEUTRAL,hover:0};
+    return {mouse,hover};
+  }
   const clock=new THREE.Clock();
   function loop(){requestAnimationFrame(loop);
     const r=host.getBoundingClientRect();const vh=innerHeight;
@@ -1562,26 +2229,57 @@ let mouseRaw=new THREE.Vector2(.5,.5),hoverRaw=0;
 addEventListener('pointermove',e=>{const p=vpPoint(e);mouseRaw.set(p.x/innerWidth,1-p.y/innerHeight);hoverRaw=1;});
 addEventListener('pointerleave',()=>hoverRaw=0);
 
-/* per-section mouse integration: track / momentum / spring / axes */
-function updateSectionMouse(rt){
-  const it=ensureInteractivity(rt.cfg);
-  const track=(it.track??0)/100;        // 0..1
-  const momentum=(it.momentum??0)/100;  // 0..1
-  const spring=(it.spring??0)/100;      // 0..1
-  // target the section mouse follows = raw cursor, masked by axes
-  let tx=mouseRaw.x, ty=mouseRaw.y;
+/* one spring-damper step toward a raw target, masked by axes/track. Used by
+   BOTH the section integrator and each effect's custom integrator so the feel
+   is identical. Mutates state {mouse,vel,hover}. */
+function stepSpring(state, it, mraw, hraw){
+  const track=(it.track??0)/100, momentum=(it.momentum??0)/100, spring=(it.spring??0)/100;
+  let tx=mraw.x, ty=mraw.y;
   if(it.axes==='x') ty=0.5;
   if(it.axes==='y') tx=0.5;
-  // spring-damper toward target. higher spring = snappier; momentum = less damping (more carry)
-  const k = 0.04 + spring*0.30;             // stiffness
-  const damp = 0.85 - momentum*0.20;        // damping (momentum reduces damping => overshoot)
-  rt.vel.x = (rt.vel.x + (tx-rt.mouse.x)*k)*damp;
-  rt.vel.y = (rt.vel.y + (ty-rt.mouse.y)*k)*damp;
-  rt.mouse.x += rt.vel.x;
-  rt.mouse.y += rt.vel.y;
-  // hover (effect strength) scales by track amount
-  rt.hover += ((hoverRaw*track)-rt.hover)*0.1;
+  const k=0.04+spring*0.30, damp=0.85-momentum*0.20;
+  state.vel.x=(state.vel.x+(tx-state.mouse.x)*k)*damp;
+  state.vel.y=(state.vel.y+(ty-state.mouse.y)*k)*damp;
+  // easing shapes how the spring settles: 'out' decelerates harder into rest
+  // (less bounce), 'in' eases away from rest, 'ease' is smoothstep both ends.
+  // Implemented as a remap on the approach fraction toward the target.
+  const ez=EASE[it.easing||'linear']||EASE.linear;
+  if((it.easing||'linear')!=='linear'){
+    // distance-based shaping: closer to target -> stronger settle, scaled by ease
+    const dx=tx-state.mouse.x, dy=ty-state.mouse.y;
+    const dist=Math.min(1,Math.sqrt(dx*dx+dy*dy)*2.0);
+    const shape=ez(1-dist);                      // near target (small dist) -> larger shape
+    state.vel.x*=(1-shape*0.4);                   // bleed velocity as it nears rest
+    state.vel.y*=(1-shape*0.4);
+  }
+  state.mouse.x+=state.vel.x; state.mouse.y+=state.vel.y;
+  state.hover+=((hraw*track)-state.hover)*0.1;
 }
+/* section interactivity is active unless explicitly turned off (back-compat:
+   absent `on` = on). */
+function sectionItActive(s){const it=s.interactivity; return !!it && it.on!==false;}
+/* per-section mouse integration (only when the section's own interactivity is on) */
+function updateSectionMouse(rt){
+  if(!sectionItActive(rt.cfg)){ rt.hover+=(0-rt.hover)*0.1; return; }   // decay hover to rest when off
+  stepSpring(rt, rt.cfg.interactivity, mouseRaw, hoverRaw);
+}
+/* resolve the mouse + hover an effect layer should receive:
+   layer.interactivity.mode: 'custom' -> its own spring (stepped here)
+                             'off'     -> neutral (centered, no hover)
+                             'section'/absent -> the section's resolved mouse */
+function effectMouse(rt, layer){
+  const li=layer.interactivity;
+  if(li && li.mode==='custom'){
+    let st=rt.fxState.get(layer);
+    if(!st){ st={mouse:new THREE.Vector2(.5,.5),vel:new THREE.Vector2(0,0),hover:0}; rt.fxState.set(layer,st); }
+    stepSpring(st, li, mouseRaw, hoverRaw);
+    return st;
+  }
+  if(li && li.mode==='off') return {mouse:NEUTRAL_MOUSE, hover:0};
+  // section default (or section off -> rt.mouse drifts to rest, rt.hover decays to 0)
+  return rt;
+}
+const NEUTRAL_MOUSE=new THREE.Vector2(.5,.5);
 
 /* ---- draggable text handles (DOM overlay over the GL canvas) ----
    Text lives inside the GL texture, so it can't be dragged directly.
@@ -1629,7 +2327,7 @@ function buildHandles(activeIdx){
      and it lives in the currently visible section. */
   if(selected.si===activeIdx && selected.li!==null){
     const lay=s.layers[selected.li];
-    if(lay && lay.type==='effect' && lay.mask && lay.mask.on && !lay.hidden) buildMaskGizmo(lay);
+    if(lay && (lay.type==='effect'||lay.type==='generator') && lay.mask && lay.mask.on && !lay.hidden) buildMaskGizmo(lay);
   }
 }
 function buildMaskGizmo(layer){
@@ -1707,7 +2405,7 @@ function tick(){
 
   // integrate per-section mouse every frame (so momentum keeps moving even off-screen)
   sections.forEach(updateSectionMouse);
-  sections.forEach(rt=>updateTrail(rt,t));
+  sections.forEach(rt=>{ updateTrail(rt,t); rt.cfg.layers.forEach(layer=>updateLayerTrail(rt,layer,t)); });
 
   const active=sections.map((rt,i)=>({rt,i,op:opacityFor(rt.cfg,gt)})).filter(o=>o.op>0.001);
   if(active.length===0){renderer.setRenderTarget(null);renderer.clear();}
@@ -1730,7 +2428,7 @@ function tick(){
   const domIdx = dom? dom.i : -1;
   if(domIdx!==handleSectionIdx && !draggingHandle && !maskDrag) buildHandles(domIdx);
 }
-addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);[rtA,rtB,...sections.map(s=>s.result)].forEach(rt=>rt.setSize(innerWidth,innerHeight));refreshHandles();});
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);[rtA,rtB,...sections.map(s=>s.result)].forEach(rt=>rt.setSize(innerWidth,innerHeight));sections.forEach(s=>{if(s.result._genRT)s.result._genRT.setSize(innerWidth,innerHeight);});refreshHandles();});
 
 renderDOM();buildUI();buildHUD();tick();
 </script>
